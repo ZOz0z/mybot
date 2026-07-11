@@ -338,7 +338,6 @@ async def send_startup_message_async(watchlist_size: int, timeframe: int) -> Non
 
 def send_startup_message(watchlist_size, timeframe):
     try:
-        import loop
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
