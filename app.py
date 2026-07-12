@@ -86,7 +86,7 @@ FVG_LOOKBACK = 3               # how many recent candles to scan for an unfilled
 POLL_SECONDS = 60              # how often to check whether a new 15-min bar has closed
 
 # --- Heartbeat ---
-HEARTBEAT_SECONDS = 3600       # send a Telegram "still alive" message this often, market open or not
+HEARTBEAT_SECONDS = 14400       # send a Telegram "still alive" message this often, market open or not
 
 # --- State file (prevents duplicate alerts for the same bar/ticker) ---
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".alert_state.json")
