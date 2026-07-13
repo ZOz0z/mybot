@@ -356,7 +356,17 @@ async def send_heartbeat_async() -> None:
 def send_heartbeat() -> None:
     """Sync wrapper; failures are logged but never crash the scan loop."""
     try:
-        asyncio.run(send_heartbeat_async())
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        if loop.is_running():
+            # إذا كان الـ loop شغال فعلياً، نرسلها كمهمة خلفية
+            asyncio.run_coroutine_threadable(send_heartbeat_async())
+        else:
+            loop.run_until_complete(send_heartbeat_async())
     except Exception as exc:
         print(f"Failed to send heartbeat: {exc}")
 
