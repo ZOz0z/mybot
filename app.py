@@ -243,7 +243,12 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
     volume = last["volume"]
     avg_volume = last["avg_volume"]
     rsi = last["rsi"]
+# 1. فحص الـ FVG أولاً كشرط إلزامي وصمام أمان
+    fvg = detect_bullish_fvg(df)
+    if fvg is None:
+        return None  # إذا ما فيه فجوة سعرية، نلغي الصفقة فوراً وبدون نقاش!
 
+    # 2. فحص بقية الشروط الأربعة
     checks = {
         "trend": ema_fast > ema_mid > ema_slow,
         "price_above_ema_vwap": close > ema_fast and close > vwap,
@@ -251,11 +256,11 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
         "rsi_in_range": RSI_MIN <= rsi <= RSI_MAX,
     }
 
-    if not all(checks.values()):
-        return None
+    # حساب كم شرط تحقق من الشروط الأربعة
+    satisfied_count = sum(1 for val in checks.values() if val)
 
-    fvg = detect_bullish_fvg(df)
-    if fvg is None:
+    # نقبل الصفقة إذا تحقق الـ FVG + على الأقل 3 شروط من الـ 4 الأخرى
+    if satisfied_count < 3:
         return None
 
     return {
