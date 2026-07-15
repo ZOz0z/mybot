@@ -4,13 +4,13 @@ Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
 Single-file version, packaged for a standard Python deployment (e.g. Railway).
 
 Strategy — on each freshly closed 15-minute bar, checks:
-  1. Trend:      EMA9 > EMA20 > EMA50
-  2. Location:   Close > EMA9 and Close > VWAP
-  3. Volume:     current volume > 1.2x the 20-period average volume
-  4. Momentum:   RSI(14) between 55 and 70
-  5. Structure:  an unfilled bullish Fair Value Gap confirming the move
+  1. Strength:   Last candle is a strong bullish candle (body >= 60% of total range) [ صمام الأمان الجديد ]
+  2. Trend:      EMA9 > EMA20 > EMA50
+  3. Location:   Close > EMA9 and Close > VWAP
+  4. Volume:     current volume > 1.2x the 20-period average volume
+  5. Momentum:   RSI(14) between 55 and 70
 
-When all five align, a formatted alert is sent to Telegram. An hourly
+When conditions align, a formatted alert is sent to Telegram. An hourly
 heartbeat message is also sent so you can confirm the bot is alive 24/7
 without waiting for a signal or for market open.
 
@@ -243,12 +243,13 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
     volume = last["volume"]
     avg_volume = last["avg_volume"]
     rsi = last["rsi"]
-# 1. فحص الـ FVG أولاً كشرط إلزامي وصمام أمان
-    fvg = detect_bullish_fvg(df)
-    if fvg is None:
-        return None  # إذا ما فيه فجوة سعرية، نلغي الصفقة فوراً وبدون نقاش!
 
-    # 2. فحص بقية الشروط الأربعة
+    # 1. فحص الشمعة الصاعدة القوية كبديل للـ FVG وصمام أمان رئيسي (شرط الـ 60% الإلزامي)
+    strong_candle = (close - last["open"]) > (last["high"] - last["low"]) * 0.6
+    if not strong_candle:
+        return None  # إذا لم تكن الشمعة قوية وزخمها عالٍ، نلغي الإشارة فوراً وبدون نقاش!
+
+    # 2. فحص بقية الشروط الأربعة المرنة
     checks = {
         "trend": ema_fast > ema_mid > ema_slow,
         "price_above_ema_vwap": close > ema_fast and close > vwap,
@@ -259,10 +260,11 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
     # حساب كم شرط تحقق من الشروط الأربعة
     satisfied_count = sum(1 for val in checks.values() if val)
 
-    # نقبل الصفقة إذا تحقق الـ FVG + على الأقل 3 شروط من الـ 4 الأخرى
+    # نقبل الصفقة إذا كانت الشمعة قوية + تحقق على الأقل 3 شروط من الأربعة الأخرى
     if satisfied_count < 3:
         return None
 
+    # نضع قيم تقريبية للـ fvg في مخرجات التنبيه لتجنب تعطل رسالة التليجرام المقرونة بالـ fvg سابقاً
     return {
         "bar_time": df.index[-1],
         "close": float(close),
@@ -273,9 +275,9 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
         "volume": float(volume),
         "avg_volume": float(avg_volume),
         "rsi": float(rsi),
-        "fvg_top": fvg["gap_top"],
-        "fvg_bottom": fvg["gap_bottom"],
-        "fvg_time": fvg["time"],
+        "fvg_top": float(last["high"]),
+        "fvg_bottom": float(last["low"]),
+        "fvg_time": df.index[-1],
     }
 
 
