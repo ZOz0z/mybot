@@ -415,22 +415,28 @@ def check_credentials() -> None:
 
 def scan_once(state: dict) -> None:
     for symbol in TICKERS:
-        print(f"scanning {symbol}")
-      try:
-        df = fetch_bars(symbol)
-        print(f"{symbol}: {len(df)} bars")
+        print(f"Scanning {symbol}")
+
+        try:
+            df = fetch_bars(symbol)
+            print(f"{symbol}: {len(df)} bars")
+
+            if df.empty or len(df) < 5:
                 continue
 
             bar_time_iso = df.index[-1].isoformat()
+
             if already_alerted(state, symbol, bar_time_iso):
                 continue
 
             signal = evaluate_signal(df)
+
             if signal is None:
-              print(f"{symbol}: no signal")
+                print(f"{symbol}: no signal")
                 continue
 
-            print(f"[{datetime.now(timezone.utc).isoformat()}] Signal confirmed for {symbol} at {bar_time_iso}")
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Signal confirmed for {symbol}")
+
             send_alert(symbol, signal)
             mark_alerted(state, symbol, bar_time_iso)
             save_alerted_bars(state)
