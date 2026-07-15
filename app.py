@@ -1,24 +1,16 @@
 """
 Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
+Fully customized with Abdulaziz's strict breakout and momentum rules.
 
-Single-file version, packaged for a standard Python deployment (e.g. Railway).
-
-Strategy — on each freshly closed 15-minute bar, checks:
-  1. Strength:   Last candle is a strong bullish candle (body >= 60% of total range) [ صمام الأمان الجديد ]
-  2. Trend:      EMA9 > EMA20 > EMA50
-  3. Location:   Close > EMA9 and Close > VWAP
-  4. Volume:     current volume > 1.2x the 20-period average volume
-  5. Momentum:   RSI(14) between 55 and 70
-
-When conditions align, a formatted alert is sent to Telegram. An hourly
-heartbeat message is also sent so you can confirm the bot is alive 24/7
-without waiting for a signal or for market open.
-
-Run with:  python app.py
-Required env vars: ALPACA_API_KEY, ALPACA_SECRET_KEY, TELEGRAM_BOT_TOKEN,
-                    TELEGRAM_CHAT_ID
-Optional env vars: PORT (defaults to 8080; used only for the health-check
-                    web server Railway can ping)
+Strategy checks on each freshly closed 15-minute bar:
+  1. Strength:   Last candle is strong (body >= 60% of total range).
+  2. Breakout:   Close price breaks above the highest high of the previous 10 candles.
+  3. Safety:     Stock is NOT up more than 4% from the daily opening price.
+  4. Trend:      EMA9 > EMA20 > EMA50.
+  5. VWAP:       Close price is above VWAP.
+  6. Volume:     RVOL > 1.7 (current volume > 1.7x the 20-period average volume).
+  7. Momentum:   RSI(14) is strictly between 58 and 68.
+  8. Trend Str:  ADX(14) > 25 (confirming a strong active trend).
 """
 
 import asyncio
@@ -42,18 +34,16 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 
-# Loads a local .env file if present; on Railway, real env vars set in the
-# dashboard take precedence and this is a no-op.
+# Loads env variables
 load_dotenv()
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-# --- Credentials (read from environment / Railway variables) ---
 ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_PAPER = True  # Paper trading mode — this bot only reads data and alerts, never trades.
+ALPACA_PAPER = True  
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -67,31 +57,28 @@ TICKERS = [
     "RZLV", "LAES", "GFI", "U", "FIG",
 ]
 
-# --- Timeframe ---
+# --- Timeframe & Warmup ---
 TIMEFRAME_MINUTES = 15
-BARS_LOOKBACK = 120  # number of 15-min bars to fetch per scan (covers EMA50 warmup)
+BARS_LOOKBACK = 120  
 
 # --- Strategy thresholds ---
-VOLUME_MULTIPLIER = 1.2       # current volume must exceed 1.2x the 20-period avg volume
+VOLUME_MULTIPLIER = 1.7       # RVOL > 1.7
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
-RSI_MIN = 55
-RSI_MAX = 70
+RSI_MIN = 58
+RSI_MAX = 68
 EMA_FAST = 9
 EMA_MID = 20
 EMA_SLOW = 50
-FVG_LOOKBACK = 3               # how many recent candles to scan for an unfilled bullish FVG
+ADX_THRESHOLD = 25
+MAX_DAILY_RETURN = 0.04       # 4% Max from Daily Open
 
 # --- Scan cadence ---
-POLL_SECONDS = 60              # how often to check whether a new 15-min bar has closed
+POLL_SECONDS = 60              
+HEARTBEAT_SECONDS = 14400       
 
-# --- Heartbeat ---
-HEARTBEAT_SECONDS = 14400       # send a Telegram "still alive" message this often, market open or not
-
-# --- State file (prevents duplicate alerts for the same bar/ticker) ---
+# --- State & Ports ---
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".alert_state.json")
-
-# --- Health-check web server (lets Railway confirm the service is up) ---
 PORT = int(os.environ.get("PORT", 8080))
 
 
@@ -111,7 +98,6 @@ def get_data_client() -> StockHistoricalDataClient:
 
 
 def get_trading_client() -> TradingClient:
-    """Only used to confirm the market clock / trading calendar."""
     global _trading_client
     if _trading_client is None:
         _trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
@@ -124,10 +110,6 @@ def is_market_open() -> bool:
 
 
 def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
-    """
-    Returns a DataFrame indexed by timestamp (UTC) with columns:
-    open, high, low, close, volume. Only fully closed bars are returned.
-    """
     client = get_data_client()
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
@@ -140,7 +122,6 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # bars.df has a MultiIndex (symbol, timestamp) when requesting a single symbol too.
     if isinstance(df.index, pd.MultiIndex):
         df = df.xs(symbol, level="symbol")
 
@@ -149,25 +130,25 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
 
 
 # =============================================================================
-# Indicators and Fair Value Gap (FVG) detection
+# Indicators
 # =============================================================================
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds EMA9/20/50, RSI14, VWAP, and rolling average volume columns to df.
-    Expects df with columns: open, high, low, close, volume and a DatetimeIndex.
-    """
     df = df.copy()
 
     df[f"ema{EMA_FAST}"] = ta.ema(df["close"], length=EMA_FAST)
     df[f"ema{EMA_MID}"] = ta.ema(df["close"], length=EMA_MID)
     df[f"ema{EMA_SLOW}"] = ta.ema(df["close"], length=EMA_SLOW)
     df["rsi"] = ta.rsi(df["close"], length=RSI_PERIOD)
-
-    # Session VWAP, anchored to each calendar day so it resets daily like a real intraday VWAP.
     df["vwap"] = _daily_vwap(df)
-
     df["avg_volume"] = df["volume"].rolling(window=VOLUME_AVG_PERIOD).mean()
+    
+    # ADX Calculation
+    adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+    if adx_df is not None:
+        df["adx"] = adx_df["ADX_14"]
+    else:
+        df["adx"] = 0
 
     return df
 
@@ -183,88 +164,66 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     return cum_pv / cum_vol.replace(0, pd.NA)
 
 
-def detect_bullish_fvg(df: pd.DataFrame, lookback: int = FVG_LOOKBACK) -> dict | None:
-    """
-    Looks for a classic 3-candle bullish Fair Value Gap in the most recent `lookback`
-    candles: candle[i-2].high < candle[i].low, leaving an unfilled gap that price has
-    not traded back into. Returns the gap details if the most recent gap is still open
-    (i.e. price hasn't closed back below the gap's top), else None.
-    """
-    if len(df) < lookback + 2:
-        return None
-
-    recent = df.iloc[-(lookback + 2):]
-    found = None
-
-    for i in range(2, len(recent)):
-        candle_low_2_ago = recent["low"].iloc[i]
-        candle_high_2_before = recent["high"].iloc[i - 2]
-
-        if candle_low_2_ago > candle_high_2_before:
-            gap_bottom = candle_high_2_before
-            gap_top = candle_low_2_ago
-            gap_time = recent.index[i]
-            found = {"gap_bottom": float(gap_bottom), "gap_top": float(gap_top), "time": gap_time}
-
-    if found is None:
-        return None
-
-    # Confirm the gap hasn't been fully filled since it formed: close must still be
-    # trading above the gap's bottom.
-    latest_close = df["close"].iloc[-1]
-    if latest_close < found["gap_bottom"]:
-        return None
-
-    return found
-
-
 # =============================================================================
 # Signal evaluation
 # =============================================================================
 
 def evaluate_signal(df: pd.DataFrame) -> dict | None:
-    """
-    df must contain enough raw OHLCV bars to warm up EMA50. Returns a dict with
-    signal details if every condition passes on the most recently CLOSED bar,
-    otherwise None.
-    """
     df = compute_indicators(df)
 
-    if df[[f"ema{EMA_SLOW}", "rsi", "vwap", "avg_volume"]].iloc[-1].isna().any():
-        return None  # not enough warm-up data yet
+    if df[[f"ema{EMA_SLOW}", "rsi", "vwap", "avg_volume", "adx"]].iloc[-1].isna().any():
+        return None  
 
     last = df.iloc[-1]
-
-    ema_fast = last[f"ema{EMA_FAST}"]
-    ema_mid = last[f"ema{EMA_MID}"]
-    ema_slow = last[f"ema{EMA_SLOW}"]
+    
     close = last["close"]
-    vwap = last["vwap"]
+    open_price = last["open"]
+    high = last["high"]
+    low = last["low"]
     volume = last["volume"]
     avg_volume = last["avg_volume"]
     rsi = last["rsi"]
+    vwap = last["vwap"]
+    adx = last["adx"]
+    
+    ema_fast = last[f"ema{EMA_FAST}"]
+    ema_mid = last[f"ema{EMA_MID}"]
+    ema_slow = last[f"ema{EMA_SLOW}"]
 
-    # 1. فحص الشمعة الصاعدة القوية كبديل للـ FVG وصمام أمان رئيسي (شرط الـ 60% الإلزامي)
-    strong_candle = (close - last["open"]) > (last["high"] - last["low"]) * 0.6
+    # 1. فحص الشمعة الصاعدة القوية (جسم الشمعة أكبر من 60% من مداها الكامل)
+    strong_candle = (close - open_price) > (high - low) * 0.6
     if not strong_candle:
-        return None  # إذا لم تكن الشمعة قوية وزخمها عالٍ، نلغي الإشارة فوراً وبدون نقاش!
-
-    # 2. فحص بقية الشروط الأربعة المرنة
-    checks = {
-        "trend": ema_fast > ema_mid > ema_slow,
-        "price_above_ema_vwap": close > ema_fast and close > vwap,
-        "volume_surge": avg_volume > 0 and volume > VOLUME_MULTIPLIER * avg_volume,
-        "rsi_in_range": RSI_MIN <= rsi <= RSI_MAX,
-    }
-
-    # حساب كم شرط تحقق من الشروط الأربعة
-    satisfied_count = sum(1 for val in checks.values() if val)
-
-    # نقبل الصفقة إذا كانت الشمعة قوية + تحقق على الأقل 3 شروط من الأربعة الأخرى
-    if satisfied_count < 3:
         return None
 
-    # نضع قيم تقريبية للـ fvg في مخرجات التنبيه لتجنب تعطل رسالة التليجرام المقرونة بالـ fvg سابقاً
+    # 2. اختراق أعلى قمة لآخر 10 شمعات (باستثناء الشمعة الحالية المغلقة)
+    previous_10_bars = df.iloc[-11:-1]
+    highest_of_last_10 = previous_10_bars["high"].max()
+    is_breakout = close > highest_of_last_10
+    if not is_breakout:
+        return None
+
+    # 3. لا يكون مرتفعاً أكثر من 4% عن افتتاح اليوم الحالي
+    current_day = df.index[-1].date()
+    day_bars = df[df.index.date == current_day]
+    if day_bars.empty:
+        return None
+    daily_open = day_bars["open"].iloc[0]  
+    daily_return = (close - daily_open) / daily_open
+    if daily_return > MAX_DAILY_RETURN:
+        return None
+
+    # 4. الشروط الفنية الصارمة المتبقية (يجب أن تتحقق جميعها)
+    checks = {
+        "trend": ema_fast > ema_mid > ema_slow,                         # EMA 9 > 20 > 50
+        "above_vwap": close > vwap,                                     # الإغلاق فوق الـ VWAP
+        "rvol": avg_volume > 0 and volume > VOLUME_MULTIPLIER * avg_volume, # RVOL > 1.7
+        "adx_strong": adx > ADX_THRESHOLD,                              # ADX > 25
+        "rsi_range": RSI_MIN <= rsi <= RSI_MAX                         # RSI بين 58 و 68
+    }
+
+    if not all(checks.values()):
+        return None
+
     return {
         "bar_time": df.index[-1],
         "close": float(close),
@@ -275,9 +234,9 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
         "volume": float(volume),
         "avg_volume": float(avg_volume),
         "rsi": float(rsi),
-        "fvg_top": float(last["high"]),
-        "fvg_bottom": float(last["low"]),
-        "fvg_time": df.index[-1],
+        "adx": float(adx),
+        "daily_return": float(daily_return * 100),
+        "highest_of_last_10": float(highest_of_last_10),
     }
 
 
@@ -297,22 +256,20 @@ def _get_bot() -> Bot:
 
 def format_signal_message(symbol: str, signal: dict) -> str:
     bar_time = signal["bar_time"]
-    if isinstance(bar_time, datetime):
-        bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M UTC")
-    else:
-        bar_time_str = str(bar_time)
+    bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M UTC") if isinstance(bar_time, datetime) else str(bar_time)
 
     return (
-        f"🟢 *LONG SIGNAL* — `{symbol}`\n"
+        f"🎯 *SNIPER BREAKOUT SIGNAL* — `{symbol}`\n"
         f"_15m bar closed {bar_time_str}_\n"
         f"\n"
-        f"💵 *Close:* `${signal['close']:.2f}`\n"
+        f"💵 *Close Price:* `${signal['close']:.2f}`\n"
+        f"🚀 *Daily Change:* `+{signal['daily_return']:.2f}%` \\(<4% Rule ✅\\)\n"
         f"📈 *Trend:* EMA9 `{signal['ema_fast']:.2f}` \\> EMA20 `{signal['ema_mid']:.2f}` \\> EMA50 `{signal['ema_slow']:.2f}`\n"
         f"📍 *VWAP:* `${signal['vwap']:.2f}` \\(price above ✅\\)\n"
-        f"📊 *Volume:* `{signal['volume']:,.0f}` vs 20\\-avg `{signal['avg_volume']:,.0f}` "
-        f"\\(`{signal['volume'] / signal['avg_volume']:.2f}x`\\)\n"
-        f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}`\n"
-        f"🔳 *Fair Value Gap:* `${signal['fvg_bottom']:.2f}` – `${signal['fvg_top']:.2f}`\n"
+        f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` \\(Target > 1.7x ✅\\)\n"
+        f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}` \\(Target: 58-68 ✅\\)\n"
+        f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target > 25 ✅\\)\n"
+        f"🔳 *10-Bar Breakout:* Above `${signal['highest_of_last_10']:.2f}` ✅\n"
         f"\n"
         f"_Automated scan — not financial advice. Verify before trading._"
     )
@@ -329,7 +286,6 @@ async def send_alert_async(symbol: str, signal: dict) -> None:
 
 
 def send_alert(symbol: str, signal: dict) -> None:
-    """Sync wrapper so callers don't need to manage an event loop themselves."""
     asyncio.run(send_alert_async(symbol, signal))
 
 
@@ -338,7 +294,7 @@ async def send_startup_message_async(watchlist_size: int, timeframe: int) -> Non
     text = (
         f"🤖 *Sniper Bot started*\n"
         f"Watching `{watchlist_size}` tickers on the `{timeframe}m` timeframe\\.\n"
-        f"You'll get an alert here when a valid long setup closes\\."
+        f"Using Abdulaziz's strict breakout strategy\\."
     )
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -361,7 +317,6 @@ async def send_heartbeat_async() -> None:
 
 
 def send_heartbeat() -> None:
-    """Sync wrapper; failures are logged but never crash the scan loop."""
     try:
         try:
             loop = asyncio.get_event_loop()
@@ -370,7 +325,6 @@ def send_heartbeat() -> None:
             asyncio.set_event_loop(loop)
             
         if loop.is_running():
-            # إذا كان الـ loop شغال فعلياً، نرسلها كمهمة خلفية
             asyncio.run_coroutine_threadable(send_heartbeat_async())
         else:
             loop.run_until_complete(send_heartbeat_async())
@@ -384,11 +338,11 @@ def send_error_message(text: str) -> None:
             _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ Scanner error: {text}")
         )
     except Exception:
-        pass  # never let a notification failure crash the scanner
+        pass  
 
 
 # =============================================================================
-# Alert-dedup state (on disk)
+# Alert-dedup state
 # =============================================================================
 
 def load_alerted_bars() -> dict:
@@ -415,10 +369,8 @@ def mark_alerted(state: dict, symbol: str, bar_time_iso: str) -> None:
 
 
 # =============================================================================
-# Health-check web server (background thread)
+# Health-check web server
 # =============================================================================
-# Railway (and any uptime pinger) can hit this to confirm the process is up.
-# Not required for the bot's own logic — it never receives trading data here.
 
 _health_app = Flask(__name__)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -454,10 +406,7 @@ def check_credentials() -> None:
         if not value
     ]
     if missing:
-        raise SystemExit(
-            f"Missing required environment variables: {', '.join(missing)}. "
-            f"Set them in your deployment platform's environment variables."
-        )
+        raise SystemExit(f"Missing required environment variables: {', '.join(missing)}.")
 
 
 def scan_once(state: dict) -> None:
@@ -487,14 +436,12 @@ def scan_once(state: dict) -> None:
 
 def main() -> None:
     check_credentials()
-
     start_health_server()
 
     print(f"Starting scanner for {len(TICKERS)} tickers on the {TIMEFRAME_MINUTES}m timeframe...")
     send_startup_message(len(TICKERS), TIMEFRAME_MINUTES)
 
     state = load_alerted_bars()
-
     last_heartbeat = 0.0
 
     while True:
