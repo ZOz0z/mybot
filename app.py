@@ -275,6 +275,26 @@ def format_signal_message(symbol: str, signal: dict) -> str:
     )
 
 
+def safe_run_async(coro):
+    """طريقة آمنة لتشغيل الدوال غير المتزامنة لحل مشاكل الـ Event Loop نهائياً."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    if loop.is_running():
+        # تشغيل الدالة في الـ Loop الحالي إذا كان قيد التشغيل بالفعل
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+    else:
+        return loop.run_until_complete(coro)
+
+
+def send_alert(symbol: str, signal: dict) -> None:
+    safe_run_async(send_alert_async(symbol, signal))
+
+
 async def send_alert_async(symbol: str, signal: dict) -> None:
     message = format_signal_message(symbol, signal)
     bot = _get_bot()
@@ -285,58 +305,42 @@ async def send_alert_async(symbol: str, signal: dict) -> None:
     )
 
 
-def send_alert(symbol: str, signal: dict) -> None:
-    asyncio.run(send_alert_async(symbol, signal))
-
-
-async def send_startup_message_async(watchlist_size: int, timeframe: int) -> None:
-    bot = _get_bot()
-    text = (
-        f"🤖 *Sniper Bot started*\n"
-        f"Watching `{watchlist_size}` tickers on the `{timeframe}m` timeframe\\.\n"
-        f"Using Abdulaziz's strict breakout strategy\\."
-    )
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2)
-
-
 def send_startup_message(watchlist_size, timeframe):
+    async def _send():
+        bot = _get_bot()
+        text = (
+            f"🤖 *Sniper Bot started*\n"
+            f"Watching `{watchlist_size}` tickers on the `{timeframe}m` timeframe\\.\n"
+            f"Using Abdulaziz's strict breakout strategy\\."
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2)
+    
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(send_startup_message_async(watchlist_size, timeframe))
+        safe_run_async(_send())
+    except Exception as exc:
+        print(f"Failed to send startup message: {exc}")
 
 
 async def send_heartbeat_async() -> None:
     bot = _get_bot()
     await bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text="Sniper Bot status: Active and scanning 40 stocks.",
+        text="Sniper Bot status: Active and scanning 42 stocks.",
     )
 
 
 def send_heartbeat() -> None:
     try:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        if loop.is_running():
-            asyncio.run_coroutine_threadable(send_heartbeat_async())
-        else:
-            loop.run_until_complete(send_heartbeat_async())
+        safe_run_async(send_heartbeat_async())
     except Exception as exc:
         print(f"Failed to send heartbeat: {exc}")
 
 
 def send_error_message(text: str) -> None:
+    async def _send():
+        await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ Scanner error: {text}")
     try:
-        asyncio.run(
-            _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ Scanner error: {text}")
-        )
+        safe_run_async(_send())
     except Exception:
         pass  
 
