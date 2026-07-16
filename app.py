@@ -2,19 +2,7 @@
 Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
 Fully customized with Abdulaziz's ultra-strict, institutional-grade breakout rules.
 
-Strategy checks on each freshly closed 15-minute bar:
-  1. Base Strength: Last candle body >= 60% of total range.
-  2. Breakout:      Close price breaks and closes above the highest high of the previous 10 candles.
-  3. Safety:        Daily return <= 4% from open.
-  4. Trend:         EMA9 > EMA20 > EMA50 and EMA50 > EMA200.
-  5. VWAP & EMA:    Close price is above EMA9 and above VWAP.
-  6. Distance:      Close price is <= 2% away from EMA9.
-  7. Volume Surge:  RVOL > 1.5 AND current volume > 20-period average volume.
-  8. Dollar Volume: Close * Volume > $10,000,000.
-  9. Exhaustion (2):The last two candles are NOT consecutive bullish candles with body >= 80% of range.
-  10. Exhaustion (1):The last candle's total range (High-Low)/Close is <= 6%.
-  11. Momentum:     RSI(14) strictly between 58 and 68.
-  12. Trend Strength:ADX(14) > 25.
+Optimized Settings: Balanced for high-probability setups without choking signals.
 """
 
 import asyncio
@@ -61,25 +49,27 @@ TICKERS = [
     "RZLV", "LAES", "GFI", "U", "FIG",
 ]
 
-# --- Timeframe & Warmup (Increase lookback slightly to warm up EMA200 properly) ---
+# --- Timeframe & Warmup ---
 TIMEFRAME_MINUTES = 15
 BARS_LOOKBACK = 250  
 
-# --- Strategy thresholds ---
-VOLUME_MULTIPLIER = 1.5       # RVOL > 1.5
+# --- Strategy thresholds (تم تعديلها بذكاء لزيادة الفرص مع الحفاظ على القوة) ---
+VOLUME_MULTIPLIER = 1.3       # تم تخفيفه قليلاً من 1.5 إلى 1.3 لفرص أكثر مرونة
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
-RSI_MIN = 58
-RSI_MAX = 68
+RSI_MIN = 55                  # تم التوسيع من 58 إلى 55 لالتقاط بداية الزخم
+RSI_MAX = 70                  # تم التوسيع من 68 إلى 70 للسماح بالاختراقات القوية جداً
 EMA_FAST = 9
 EMA_MID = 20
 EMA_SLOW = 50
 EMA_LONG = 200
-ADX_THRESHOLD = 25
-MAX_DAILY_RETURN = 0.04       # 4% Max from Daily Open
-MAX_EMA9_DISTANCE = 0.02      # 2% Max distance from EMA9
-MAX_CANDLE_RANGE = 0.06       # 6% Max candle range (High-Low)/Close
-MIN_DOLLAR_VOLUME = 15000000.0 # $15,000,000 Min liquidity
+ADX_THRESHOLD = 23            # تم تعديله من 25 إلى 23 (لأن 23 يعتبر اتجاه قوي كافٍ على الـ 15 دقيقة)
+MAX_DAILY_RETURN = 0.05       # رفع حد الصعود اليومي لـ 5% (أفضل الاختراقات تحدث والأسهم مرتفعة بقوة)
+MAX_EMA9_DISTANCE = 0.02      
+MAX_CANDLE_RANGE = 0.06       
+MIN_DOLLAR_VOLUME = 2000000.0 # تم تعديله إلى 2 مليون دولار لكل شمعة 15 دقيقة (موزون تماماً لقائمتك)
+MIN_ATR_PCT = 0.005           # تم تعديله لـ 0.5% بدلاً من 1.5% (توازن رهيب يمنع الأسهم الميتة فقط)
+DISTANCE_FROM_HIGH = 0.985    # تم تعديله لـ 1.5% تراجع كحد أقصى من القمة اليومية بدلاً من 0.5%
 
 # --- Scan cadence ---
 POLL_SECONDS = 60              
@@ -184,10 +174,9 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     to save CPU resources, and records the exact reason if rejected.
     Returns: (signal_dict, rejection_reason_string)
     """
-    # 1. أولاً: نقوم بحساب المؤشرات السريعة الأساسية قبل المعقدة لسرعة الرفض
     df = compute_indicators(df)
 
-    # التأكد من توفر البيانات الكافية لـ EMA200 وبقية المؤشرات
+    # التأكد من توفر البيانات الكافية
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
     if df[needed_cols].iloc[-1].isna().any():
         return None, "عدم توفر بيانات المؤشرات الكافية"
@@ -230,7 +219,6 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         candle_1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
         candle_2_range = last_2["high"].iloc[1] - last_2["low"].iloc[1]
         
-        # التأكد من أنهما صاعدتان وبمدى حقيقي
         if candle_1_range > 0 and candle_2_range > 0:
             c1_bullish = last_2["close"].iloc[0] > last_2["open"].iloc[0]
             c2_bullish = last_2["close"].iloc[1] > last_2["open"].iloc[1]
@@ -242,25 +230,26 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
                 return None, "❌ شمعتان استنزافيتان متتاليتان (>80% جسم)"
 
     # --- 4) اختراق وإغلاق فوق أعلى قمة لآخر 10 شمعات سابقة ---
-    if len(df) < 12:  # تصحيح منطق الشرط ليكون أقل من 12 وليس أكبر من أو يساوي
+    if len(df) < 12:  
         return None, "عدم توفر شمعات كافية للاختراق"
     
     previous_10_bars = df.iloc[-11:-1]
     highest_of_last_10 = previous_10_bars["high"].max()
-    is_breakout = close > highest_of_last_10 * 1.001
+    # تم إرجاعها للمقارنة المباشرة البسيطة لعدم تضييع الفرص بكسور بسيطة
+    is_breakout = close > highest_of_last_10
     if not is_breakout:
         return None, f"❌ لم يغلق فوق قمة الـ 10 شمعات ({highest_of_last_10:.2f})"
 
-    # --- 5) فلتر الـ Dollar Volume والـ ATR ---
+    # --- 5) فلتر الـ Dollar Volume والـ ATR الموزونين حديثاً ---
     dollar_volume = close * volume
     if dollar_volume < MIN_DOLLAR_VOLUME:
-        return None, f"❌ سيولة ضعيفة (${dollar_volume:,.0f})"
+        return None, f"❌ سيولة ضعيفة في الشمعة (${dollar_volume:,.0f})"
     
     atr_percent = atr / close
-    if atr_percent < 0.015:
-        return None, f"❌ منخفض ATR ({atr_percent*100:.2f}%)"
+    if atr_percent < MIN_ATR_PCT:
+        return None, f"❌ حركة السهم ميتة ATR ({atr_percent*100:.2f}%)"
 
-    # --- 6) لا يكون مرتفعاً أكثر من 4% عن افتتاح اليوم الحالي وفلتر القمة اليومية ---
+    # --- 6) لا يكون مرتفعاً أكثر من 5% عن افتتاح اليوم الحالي وفلتر القمة اليومية المرن ---
     current_day = df.index[-1].date()
     day_bars = df[df.index.date == current_day]
     if day_bars.empty:
@@ -272,8 +261,8 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         return None, f"❌ صعود مفرط اليوم ({daily_return*100:.1f}%)"
     
     today_high = day_bars["high"].max()
-    if close < today_high * 0.995:
-        return None, "بعيد عن اعلى سعر ❌"
+    if close < today_high * DISTANCE_FROM_HIGH:
+        return None, "❌ بعيد عن أعلى سعر اليوم (تجاوز حد التراجع)"
 
     # --- 7) الاتجاه طويل الأجل وصاعد (EMA50 > EMA200) ---
     if not (ema_slow > ema_long):
@@ -294,16 +283,16 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if distance_from_ema9 > MAX_EMA9_DISTANCE:
         return None, f"❌ بعيد عن EMA9 ({distance_from_ema9*100:.2f}%)"
 
-    # --- 11) تعديل شرط الحجم (RVOL > 1.5 AND Volume > Avg_Volume) ---
+    # --- 11) شرط الحجم الموزون (RVOL > 1.3 AND Volume > Avg_Volume) ---
     rvol = volume / avg_volume if avg_volume > 0 else 0
     if not (rvol > VOLUME_MULTIPLIER and volume > avg_volume):
         return None, f"❌ حجم التداول ضعيف (RVOL: {rvol:.2f}x)"
 
-    # --- 12) نطاق RSI (بين 58 و 68) ---
+    # --- 12) نطاق RSI المرن (بين 55 و 70) ---
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return None, f"❌ مؤشر RSI خارج النطاق ({rsi:.1f})"
 
-    # --- 13) قوة الترند ADX > 25 ---
+    # --- 13) قوة الترند ADX > 23 ---
     if not (adx > ADX_THRESHOLD):
         return None, f"❌ اتجاه ضعيف ADX ({adx:.1f})"
 
@@ -351,15 +340,15 @@ def format_signal_message(symbol: str, signal: dict) -> str:
         f"_15m bar closed {bar_time_str}_\n"
         f"\n"
         f"💵 *Close Price:* `${signal['close']:.2f}`\n"
-        f"🚀 *Daily Change:* `+{signal['daily_return']:.2f}%` \\(<4% Rule ✅\\)\n"
+        f"🚀 *Daily Change:* `+{signal['daily_return']:.2f}%` \\(<5% Rule ✅\\)\n"
         f"📈 *Trend:* EMA9 `{signal['ema_fast']:.2f}` \\> EMA20 `{signal['ema_mid']:.2f}` \\> EMA50 `{signal['ema_slow']:.2f}`\n"
-        f"🛡️ *Trend filter:* EMA50 \\> EMA200 `{signal['ema_long']:.2f}` ✅\n"
+        f"🛡 *Trend filter:* EMA50 \\> EMA200 `{signal['ema_long']:.2f}` ✅\n"
         f"📍 *VWAP:* `${signal['vwap']:.2f}` \\(price above ✅\\)\n"
         f"📏 *EMA9 Distance:* `{signal['distance_ema9']:.2f}%` \\(<2% Rule ✅\\)\n"
-        f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` \\(Target > 1.5x ✅\\)\n"
-        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 15M ✅\\)\n"
-        f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}` \\(Target: 58-68 ✅\\)\n"
-        f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target > 25 ✅\\)\n"
+        f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` \\(Target > 1.3x ✅\\)\n"
+        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 2M ✅\\)\n"
+        f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}` \\(Target: 55-70 ✅\\)\n"
+        f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target > 23 ✅\\)\n"
         f"🔳 *10-Bar Breakout:* Above `${signal['highest_of_last_10']:.2f}` ✅\n"
         f"\n"
         f"_Automated scan — not financial advice. Verify before trading._"
@@ -400,7 +389,7 @@ def send_startup_message(watchlist_size, timeframe):
         text = (
             f"🤖 *Sniper Bot started*\n"
             f"Watching `{watchlist_size}` tickers on the `{timeframe}m` timeframe\\.\n"
-            f"Using Abdulaziz's ultra\\-strict breakout strategy\\."
+            f"Using Abdulaziz's optimized breakout strategy\\."
         )
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2)
     
@@ -537,7 +526,6 @@ def scan_once(state: dict) -> None:
                 rejected_count += 1
                 continue
 
-            # تحسين سجل اللوق عند قبول الإشارة
             print("\n=========================")
             print("✅ SIGNAL FOUND")
             print(f"Ticker:          {symbol}")
