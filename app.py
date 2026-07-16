@@ -79,7 +79,7 @@ ADX_THRESHOLD = 25
 MAX_DAILY_RETURN = 0.04       # 4% Max from Daily Open
 MAX_EMA9_DISTANCE = 0.02      # 2% Max distance from EMA9
 MAX_CANDLE_RANGE = 0.06       # 6% Max candle range (High-Low)/Close
-MIN_DOLLAR_VOLUME = 15000000.0 # $10,000,000 Min liquidity
+MIN_DOLLAR_VOLUME = 15000000.0 # $15,000,000 Min liquidity
 
 # --- Scan cadence ---
 POLL_SECONDS = 60              
@@ -151,8 +151,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["rsi"] = ta.rsi(df["close"], length=RSI_PERIOD)
     df["vwap"] = _daily_vwap(df)
     df["avg_volume"] = df["volume"].rolling(window=VOLUME_AVG_PERIOD).mean()
-    df["atr"] = ta.atr(df["high"],
-    df["low"], df["close"], length=14)
+    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
     
     # ADX Calculation
     adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
@@ -243,35 +242,38 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
                 return None, "❌ شمعتان استنزافيتان متتاليتان (>80% جسم)"
 
     # --- 4) اختراق وإغلاق فوق أعلى قمة لآخر 10 شمعات سابقة ---
-    if len(df) >= 12:
+    if len(df) < 12:  # تصحيح منطق الشرط ليكون أقل من 12 وليس أكبر من أو يساوي
         return None, "عدم توفر شمعات كافية للاختراق"
+    
     previous_10_bars = df.iloc[-11:-1]
     highest_of_last_10 = previous_10_bars["high"].max()
-    # يجب أن يغلق السعر فوق القمة السابقة (وليس لمسها فقط)
     is_breakout = close > highest_of_last_10 * 1.001
     if not is_breakout:
         return None, f"❌ لم يغلق فوق قمة الـ 10 شمعات ({highest_of_last_10:.2f})"
 
-    # --- 5) فلتر الـ Dollar Volume (Close * Volume > $10,000,000) ---
+    # --- 5) فلتر الـ Dollar Volume والـ ATR ---
     dollar_volume = close * volume
     if dollar_volume < MIN_DOLLAR_VOLUME:
         return None, f"❌ سيولة ضعيفة (${dollar_volume:,.0f})"
-      atr_percent = atr / close
+    
+    atr_percent = atr / close
     if atr_percent < 0.015:
-      return None, f"❌ منخفض ATR ({atr_percent*100:.2f})"
+        return None, f"❌ منخفض ATR ({atr_percent*100:.2f}%)"
 
-    # --- 6) لا يكون مرتفعاً أكثر من 4% عن افتتاح اليوم الحالي ---
+    # --- 6) لا يكون مرتفعاً أكثر من 4% عن افتتاح اليوم الحالي وفلتر القمة اليومية ---
     current_day = df.index[-1].date()
     day_bars = df[df.index.date == current_day]
     if day_bars.empty:
         return None, "فشل العثور على افتتاح اليوم"
+    
     daily_open = day_bars["open"].iloc[0]  
     daily_return = (close - daily_open) / daily_open
     if daily_return > MAX_DAILY_RETURN:
         return None, f"❌ صعود مفرط اليوم ({daily_return*100:.1f}%)"
-      today_high = day_bars["high"].max()
-   if close < today_high * 0.995:
-     return None, "بعيد عن اعلى سعر ❌"
+    
+    today_high = day_bars["high"].max()
+    if close < today_high * 0.995:
+        return None, "بعيد عن اعلى سعر ❌"
 
     # --- 7) الاتجاه طويل الأجل وصاعد (EMA50 > EMA200) ---
     if not (ema_slow > ema_long):
@@ -355,7 +357,7 @@ def format_signal_message(symbol: str, signal: dict) -> str:
         f"📍 *VWAP:* `${signal['vwap']:.2f}` \\(price above ✅\\)\n"
         f"📏 *EMA9 Distance:* `{signal['distance_ema9']:.2f}%` \\(<2% Rule ✅\\)\n"
         f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` \\(Target > 1.5x ✅\\)\n"
-        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 10M ✅\\)\n"
+        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 15M ✅\\)\n"
         f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}` \\(Target: 58-68 ✅\\)\n"
         f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target > 25 ✅\\)\n"
         f"🔳 *10-Bar Breakout:* Above `${signal['highest_of_last_10']:.2f}` ✅\n"
