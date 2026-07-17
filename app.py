@@ -40,13 +40,15 @@ ALPACA_PAPER = True
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# --- Watchlist ---
+# --- Watchlist (تم دمج الأسهم الجديدة بنجاح مع الإبقاء على المكرر) ---
 TICKERS = [
     "RIVN", "NIO", "PLUG", "SOUN", "XPEV", "RIOT", "AMD", "INTC", "OPEN",
     "PATH", "TOST", "RBLX", "FRSH", "CPRT", "CELH", "TTD", "NKE", "ABT",
     "KGC", "GRWG", "HIVE", "BE", "FCX", "SLB", "AA", "SMR", "HIMS", "AUR",
     "BTE", "AMPX", "CRDO", "ALAB", "KSCP", "BLNK", "GLW", "SNDK", "ON",
     "RZLV", "LAES", "GFI", "U", "FIG",
+    "IOVA", "SOUN", "ERIC", "CMPS", "RLMD", "ALTO", "HELP", "JLHL", "NN",
+    "CCRN", "SONO", "PESI", "SSRM", "PEGA"
 ]
 
 # --- Timeframe & Warmup ---
@@ -405,7 +407,7 @@ async def send_heartbeat_async() -> None:
     bot = _get_bot()
     await bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text="Sniper Bot status: Active and scanning 42 stocks.",
+        text="Sniper Bot status: Active and scanning 55 stocks.",
     )
 
 
