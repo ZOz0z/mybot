@@ -53,23 +53,24 @@ TICKERS = [
 TIMEFRAME_MINUTES = 15
 BARS_LOOKBACK = 250  
 
-# --- Strategy thresholds (تم تعديلها بذكاء لزيادة الفرص مع الحفاظ على القوة) ---
-VOLUME_MULTIPLIER = 1.3       # تم تخفيفه قليلاً من 1.5 إلى 1.3 لفرص أكثر مرونة
+# --- Strategy thresholds (التحديثات المتوازنة الجديدة) ---
+VOLUME_MULTIPLIER = 1.3       # RVOL = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
-RSI_MIN = 55                  # تم التوسيع من 58 إلى 55 لالتقاط بداية الزخم
-RSI_MAX = 70                  # تم التوسيع من 68 إلى 70 للسماح بالاختراقات القوية جداً
+RSI_MIN = 55                  # الحد الأدنى للـ RSI
+RSI_MAX = 70                  # الحد الأعلى للـ RSI
 EMA_FAST = 9
 EMA_MID = 20
 EMA_SLOW = 50
 EMA_LONG = 200
-ADX_THRESHOLD = 23            # تم تعديله من 25 إلى 23 (لأن 23 يعتبر اتجاه قوي كافٍ على الـ 15 دقيقة)
-MAX_DAILY_RETURN = 0.05       # رفع حد الصعود اليومي لـ 5% (أفضل الاختراقات تحدث والأسهم مرتفعة بقوة)
+ADX_MIN = 23                  # الحد الأدنى لقوة الاتجاه ADX
+ADX_MAX = 35                  # الحد الأعلى لحماية الأرباح ADX
+MAX_DAILY_RETURN = 0.05       # حد الصعود اليومي الأقصى 5% من الافتتاح
 MAX_EMA9_DISTANCE = 0.02      
 MAX_CANDLE_RANGE = 0.06       
-MIN_DOLLAR_VOLUME = 2000000.0 # تم تعديله إلى 2 مليون دولار لكل شمعة 15 دقيقة (موزون تماماً لقائمتك)
-MIN_ATR_PCT = 0.005           # تم تعديله لـ 0.5% بدلاً من 1.5% (توازن رهيب يمنع الأسهم الميتة فقط)
-DISTANCE_FROM_HIGH = 0.985    # تم تعديله لـ 1.5% تراجع كحد أقصى من القمة اليومية بدلاً من 0.5%
+MIN_DOLLAR_VOLUME = 3000000.0 # سيولة الشمعة المستهدفة 3 مليون دولار
+MIN_ATR_PCT = 0.006           # مؤشر حيوية الحركة ATR = 0.6%
+DISTANCE_FROM_HIGH = 0.985    # تراجع بحد أقصى 1.5% من القمة اليومية
 
 # --- Scan cadence ---
 POLL_SECONDS = 60              
@@ -229,16 +230,17 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
                 return None, "❌ شمعتان استنزافيتان متتاليتان (>80% جسم)"
 
-    # --- 4) اختراق وإغلاق فوق أعلى قمة لآخر 10 شمعات سابقة ---
+    # --- 4) اختراق وإغلاق فوق أعلى قمة لآخر 10 شمعات سابقة بمسافة أمان 0.2% ---
     if len(df) < 12:  
         return None, "عدم توفر شمعات كافية للاختراق"
     
     previous_10_bars = df.iloc[-11:-1]
     highest_of_last_10 = previous_10_bars["high"].max()
-    # تم إرجاعها للمقارنة المباشرة البسيطة لعدم تضييع الفرص بكسور بسيطة
-    is_breakout = close > highest_of_last_10
+    target_breakout_price = highest_of_last_10 * 1.002  # فلتر الـ Breakout المطور بمسافة أمان 0.2%
+    
+    is_breakout = close > target_breakout_price
     if not is_breakout:
-        return None, f"❌ لم يغلق فوق قمة الـ 10 شمعات ({highest_of_last_10:.2f})"
+        return None, f"❌ لم يتجاوز سعر الاختراق المطلوب بقيمة ({target_breakout_price:.2f})"
 
     # --- 5) فلتر الـ Dollar Volume والـ ATR الموزونين حديثاً ---
     dollar_volume = close * volume
@@ -292,9 +294,9 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return None, f"❌ مؤشر RSI خارج النطاق ({rsi:.1f})"
 
-    # --- 13) قوة الترند ADX > 23 ---
-    if not (adx > ADX_THRESHOLD):
-        return None, f"❌ اتجاه ضعيف ADX ({adx:.1f})"
+    # --- 13) قوة الترند ADX المحصورة ذكياً بين 23 و 35 ---
+    if not (ADX_MIN <= adx <= ADX_MAX):
+        return None, f"❌ مؤشر ADX خارج النطاق المطلوب ({adx:.1f})"
 
     # إذا تم اجتياز جميع الشروط الصارمة بنجاح، يُعاد التنبيه
     signal_data = {
@@ -346,10 +348,10 @@ def format_signal_message(symbol: str, signal: dict) -> str:
         f"📍 *VWAP:* `${signal['vwap']:.2f}` \\(price above ✅\\)\n"
         f"📏 *EMA9 Distance:* `{signal['distance_ema9']:.2f}%` \\(<2% Rule ✅\\)\n"
         f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` \\(Target > 1.3x ✅\\)\n"
-        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 2M ✅\\)\n"
+        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` \\(Target > 3M ✅\\)\n"
         f"⚡ *RSI\\(14\\):* `{signal['rsi']:.1f}` \\(Target: 55-70 ✅\\)\n"
-        f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target > 23 ✅\\)\n"
-        f"🔳 *10-Bar Breakout:* Above `${signal['highest_of_last_10']:.2f}` ✅\n"
+        f"🔥 *ADX Trend Strength:* `{signal['adx']:.1f}` \\(Target: 23-35 ✅\\)\n"
+        f"🔳 *10-Bar Breakout:* Above `${signal['highest_of_last_10']:.2f}` \\(+0.2% Safety ✅\\)\n"
         f"\n"
         f"_Automated scan — not financial advice. Verify before trading._"
     )
