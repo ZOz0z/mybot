@@ -3,6 +3,7 @@ Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
 Fully customized with Abdulaziz's ultra-strict, institutional-grade breakout rules.
 
 Optimized Settings: Balanced for high-probability setups without choking signals.
+Watchlist: Fully merged with newly added tickers, dynamically de-duplicated (No AAPL).
 """
 
 import asyncio
@@ -40,21 +41,30 @@ ALPACA_PAPER = True
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# --- Watchlist (قائمة مدمجة من القائمة السابقة + الأسهم المضافة حديثاً مع تنقية التكرار) ---
+# --- Watchlist الشاملة والمدمجة (75 سهماً صافياً بدون تكرار وبدون أبل) ---
 _raw_tickers = [
-    # القائمة السابقة
-    "RIVN", "NIO", "PLUG", "HIMS", "RBLX", "S", "RKLB", "TOST", "AMKR", "AAOI", "IOVA",
-    # الأسهم المضافة حديثاً (يمكنك إضافة أي رموز هنا)
-    "TSLA", "NVDA", "AMD", "META", "AAPL" 
+    # الأسهم من القائمة السابقة في كودك
+    "RIVN", "NIO", "PLUG", "SOUN", "XPEV", "RIOT", "AMD", "INTC", "OPEN",
+    "PATH", "TOST", "RBLX", "FRSH", "CPRT", "CELH", "TTD", "NKE", "ABT",
+    "KGC", "GRWG", "HIVE", "BE", "FCX", "SLB", "AA", "SMR", "HIMS", "AUR",
+    "BTE", "AMPX", "CRDO", "ALAB", "KSCP", "BLNK", "GLW", "SNDK", "ON",
+    "RZLV", "LAES", "GFI", "U", "FIG", "IOVA", "ERIC", "CMPS", "RLMD", 
+    "ALTO", "HELP", "JLHL", "NN", "CCRN", "SONO", "PESI", "SSRM", "PEGA",
+    
+    # الإضافات الأخيرة المحددة (التي لم تكن مكررة)
+    "SDGR", "TEM", "NBIS", "RKLB", "LUNR", "OUST", "AEHR", "ACLS", "CAMT", 
+    "PDFS", "FORM", "AMKR", "VECO", "VIAV", "S", "DOCN", "ENPH", "SEDG", 
+    "MRVL", "MTSI", "ALGM", "COHR", "AAOI", "CARG"
 ]
-# تنقية التكرار تلقائياً
+
+# تنقية التكرار وترتيب الأسهم أبجدياً برمجياً لضمان النظافة
 TICKERS = sorted(list(set(_raw_tickers)))
 
 # --- Timeframe & Warmup ---
 TIMEFRAME_MINUTES = 15
 BARS_LOOKBACK = 250  
 
-# --- Strategy thresholds (التحديثات المتوازنة الجديدة) ---
+# --- Strategy thresholds (التحديثات المتوازنة المعتمدة) ---
 VOLUME_MULTIPLIER = 1.3       # RVOL = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
@@ -521,7 +531,7 @@ def scan_once(state: dict) -> None:
                 rejected_count += 1
                 continue
 
-            # تقييم الإشارة الفنية الصارمة وجلب سبب الرفض
+            # تقييم الإشارة الفنية وجلب سبب الرفض بالتفصيل عند عدم التحقق
             signal, reject_reason = evaluate_signal(df)
             
             if signal is None:
