@@ -370,7 +370,8 @@ def format_signal_message(symbol: str, signal: dict) -> str:
 
 def safe_run_async(coro):
     try:
-        loop = asyncio.get_event_loop()
+        # التعديل هنا: محاولة جلب الـ loop الفعال أولاً لمنع تحذير DeprecationWarning
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
