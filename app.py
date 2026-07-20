@@ -174,8 +174,10 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     df = compute_indicators(df)
 
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
-    if df[needed_cols].iloc[-1].isna().any():
-        return None, "عدم توفر بيانات المؤشرات الكافية"
+
+    missing = df[needed_cols].iloc[-1][df[needed_cols].iloc[-1].isna()].index.tolist()
+if missing:
+    return None, f"المؤشر الناقص: {missing}"
 
     last = df.iloc[-1]
     
