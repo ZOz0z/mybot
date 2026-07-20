@@ -55,7 +55,7 @@ _raw_tickers = [
 TICKERS = sorted(list(set(_raw_tickers)))
 
 TIMEFRAME_MINUTES = 15
-BARS_LOOKBACK = 250  
+BARS_LOOKBACK = 750  
 
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
