@@ -1,7 +1,7 @@
 """ Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
 Fully customized with Abdulaziz's ultra-strict, institutional-grade breakout rules.
 Optimized Settings: Balanced for high-probability setups without choking signals.
-Watchlist: Fully merged with newly added tickers, dynamically de-duplicated (No AAPL).
+Watchlist: Fully merged with newly added tickers, dynamically de-duplicated (No APL).
 """
 
 import asyncio
