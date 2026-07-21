@@ -115,8 +115,9 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
 
     print(symbol, "rows from alpaca =", len(df))
 
+    # 🛠️ تصحيح المحاذاة هنا
     if df.empty:
-    return df
+        return df
     if isinstance(df.index, pd.MultiIndex):
         df = df.xs(symbol, level="symbol")
     df = df[["open", "high", "low", "close", "volume"]].sort_index()
@@ -160,8 +161,7 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
 def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     df = compute_indicators(df)
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
-    
-    # 🛠️ التعديل الجديد: تحديد ورصد المؤشرات المفقودة بالضبط في اللوق
+
     last_row = df[needed_cols].iloc[-1]
     missing = last_row[last_row.isna()]
 
@@ -466,9 +466,10 @@ def scan_once(state: dict) -> None:
                 time.sleep(0.25)
                 continue
 
+            # 🛠️ تصحيح المحاذاة هنا
             print(f"{symbol} columns: {list(df.columns)}")
-print(df.tail(3))
-            
+            print(df.tail(3))
+
             signal, reject_reason = evaluate_signal(df)
             if signal is None:
                 print(f"{symbol} {reject_reason}")
