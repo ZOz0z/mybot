@@ -119,6 +119,9 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
 
         df = bars.df
 
+        print(symbol, "rows from alpaca =", len(df))
+        print(df.tail(3))
+
         if isinstance(df.index, pd.MultiIndex):
             if symbol in df.index.get_level_values("symbol"):
                 df = df.xs(symbol, level="symbol")
