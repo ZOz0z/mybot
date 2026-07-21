@@ -157,8 +157,13 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
 def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     df = compute_indicators(df)
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
-    if df[needed_cols].iloc[-1].isna().any():
-        return None, "عدم توفر بيانات المؤشرات الكافية"
+    
+    # 🛠️ التعديل الجديد: تحديد ورصد المؤشرات المفقودة بالضبط في اللوق
+    last_row = df[needed_cols].iloc[-1]
+    missing = last_row[last_row.isna()]
+
+    if not missing.empty:
+        return None, f"المؤشرات الناقصة: {list(missing.index)}"
 
     last = df.iloc[-1]
     close = last["close"]
@@ -471,7 +476,6 @@ def scan_once(state: dict) -> None:
             save_alerted_bars(state)
             signals_count += 1
 
-            # 🛠️ التعديل الأول: تأخير ربع ثانية لحماية حسابك من الحظر البرمجي (Rate Limit)
             time.sleep(0.25)
 
         except Exception as exc:
@@ -492,7 +496,7 @@ def main() -> None:
 
     state = load_alerted_bars()
     last_heartbeat = 0.0
-    last_scan_minute = -1  # 🛠️ متغير لتتبع دقيقة الفحص الأخيرة
+    last_scan_minute = -1
 
     while True:
         try:
@@ -502,7 +506,6 @@ def main() -> None:
                 last_heartbeat = now
 
             if is_market_open():
-                # 🛠️ التعديل الثاني: فحص الوقت بالدقائق والتشغيل عند إغلاق شمعة الـ 15 دقيقة فقط
                 current_time = datetime.now()
                 current_minute = current_time.minute
 
