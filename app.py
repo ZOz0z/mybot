@@ -1,7 +1,7 @@
 """ Sniper Bot — Alpaca 15-minute long-setup scanner with Telegram alerts.
 Fully customized with Abdulaziz's ultra-strict, institutional-grade breakout rules.
 Optimized Settings: Balanced for high-probability setups without choking signals.
-Watchlist: Fully merged with newly added tickers, dynamically de-duplicated (No AAPL).
+Watchlist: Fully merged with newly added tickers, dynamically de-duplicated (No APL).
 """
 
 import asyncio
@@ -104,20 +104,38 @@ def is_market_open() -> bool:
     return bool(clock.is_open)
 
 def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
-    client = get_data_client()
-    request = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(TIMEFRAME_MINUTES, TimeFrameUnit.Minute),
-        limit=limit,
-    )
-    bars = client.get_stock_bars(request)
-    df = bars.df
-    if df.empty:
-        return df
-    if isinstance(df.index, pd.MultiIndex):
-        df = df.xs(symbol, level="symbol")
-    df = df[["open", "high", "low", "close", "volume"]].sort_index()
-    return df
+    try:
+        client = get_data_client()
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(TIMEFRAME_MINUTES, TimeFrameUnit.Minute),
+            limit=limit,
+        )
+        bars = client.get_stock_bars(request)
+
+        if bars is None or getattr(bars, "df", None) is None or bars.df.empty:
+            print(f"⚠️ {symbol}: لا توجد بيانات مرجعة من Alpaca")
+            return pd.DataFrame()
+
+        df = bars.df
+
+        if isinstance(df.index, pd.MultiIndex):
+            if symbol in df.index.get_level_values("symbol"):
+                df = df.xs(symbol, level="symbol")
+            else:
+                return pd.DataFrame()
+
+        print(f"📊 {symbol} — عدد الشمعات المستلمة من Alpaca: {len(df)}")
+
+        required_cols = ["open", "high", "low", "close", "volume"]
+        if not all(col in df.columns for col in required_cols):
+            return pd.DataFrame()
+
+        return df[required_cols].sort_index()
+
+    except Exception as e:
+        print(f"❌ خطأ أثناء جلب بيانات {symbol}: {e}")
+        return pd.DataFrame()
 
 
 # =============================================================================
@@ -157,8 +175,8 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
 def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     df = compute_indicators(df)
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
-    
-    # 🛠️ التعديل الجديد: تحديد ورصد المؤشرات المفقودة بالضبط في اللوق
+
+    # رصد المؤشرات المفقودة بالضبط في اللوق
     last_row = df[needed_cols].iloc[-1]
     missing = last_row[last_row.isna()]
 
@@ -427,7 +445,7 @@ def start_health_server() -> None:
 # Main scan loop
 # =============================================================================
 
-def check_credentials() -> None:
+def check_credentials_soft() -> bool:
     missing = [
         name for name, value in [
             ("ALPACA_API_KEY", ALPACA_API_KEY),
@@ -437,7 +455,9 @@ def check_credentials() -> None:
         ] if not value
     ]
     if missing:
-        raise SystemExit(f"Missing env vars: {', '.join(missing)}")
+        print(f"❌ خطأ: متغيرات البيئة التالية مفقودة: {', '.join(missing)}")
+        return False
+    return True
 
 def scan_once(state: dict) -> None:
     start_time = time.monotonic()
@@ -488,8 +508,15 @@ def scan_once(state: dict) -> None:
     print(f"\n✅ Signals: {signals_count} | ❌ Rejected: {rejected_count} | ⏱ {elapsed:.1f}s\n")
 
 def main() -> None:
-    check_credentials()
+    # 1. تشغيل سيرفر الصحة فوراً لاجتياز Build/Deployment في Railway
     start_health_server()
+    print("🌐 تم تشغيل خادم الصحة (Health Check Server) بنجاح.")
+
+    # 2. فحص المتغيرات بمرونة
+    if not check_credentials_soft():
+        print("⚠️ يرجى إضافة المتغيرات المفقودة في Railway للبدء بالفحص.")
+        while True:
+            time.sleep(3600)
 
     print(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على {TIMEFRAME_MINUTES}m...")
     send_startup_message(len(TICKERS), TIMEFRAME_MINUTES)
