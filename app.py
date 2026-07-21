@@ -112,8 +112,11 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
     )
     bars = client.get_stock_bars(request)
     df = bars.df
+
+    print(symbol, "rows from alpaca =", len(df))
+
     if df.empty:
-        return df
+    return df
     if isinstance(df.index, pd.MultiIndex):
         df = df.xs(symbol, level="symbol")
     df = df[["open", "high", "low", "close", "volume"]].sort_index()
