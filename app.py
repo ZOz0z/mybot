@@ -51,13 +51,13 @@ _raw_tickers = [
 TICKERS = sorted(list(set(_raw_tickers)))
 
 TIMEFRAME_MINUTES = 15
-BARS_LOOKBACK = 750  # ✅ مرفوعة إلى 750 لضمان توفر بيانات كافية لجميع المؤشرات و EMA200
+BARS_LOOKBACK = 750
 
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
 RSI_MIN = 55
-RSI_MAX = 75       # ✅ تم توسيع السقف إلى 75 لاصطياد الاختراقات القوية
+RSI_MAX = 75
 
 EMA_FAST = 9
 EMA_MID = 20
@@ -65,9 +65,9 @@ EMA_SLOW = 50
 EMA_LONG = 200
 
 ADX_MIN = 20
-ADX_MAX = 50       # ✅ تم رفع الحد الأعلى للـ ADX لكي لا يتم حجب الانفجارات القوية
+ADX_MAX = 50
 
-MIN_DOLLAR_VOLUME = 1500000.0  # ✅ خفضنا حد السيولة إلى 1.5 مليون دولار ليلائم الأسهم الصغيرة بدون ضياع الفرص
+MIN_DOLLAR_VOLUME = 1500000.0
 MAX_EMA9_DISTANCE = 0.02
 MAX_CANDLE_RANGE = 0.06
 MIN_ATR_PCT = 0.006
@@ -449,17 +449,20 @@ def scan_once(state: dict) -> None:
             if df.empty or len(df) < 5:
                 print(f"{symbol} ❌ لا توجد بيانات كافية")
                 rejected_count += 1
+                time.sleep(0.25)
                 continue
 
             bar_time_iso = df.index[-1].isoformat()
             if already_alerted(state, symbol, bar_time_iso):
                 rejected_count += 1
+                time.sleep(0.25)
                 continue
 
             signal, reject_reason = evaluate_signal(df)
             if signal is None:
                 print(f"{symbol} {reject_reason}")
                 rejected_count += 1
+                time.sleep(0.25)
                 continue
 
             print(f"\n✅ SIGNAL: {symbol} @ ${signal['close']:.2f} | RSI:{signal['rsi']:.1f} | ADX:{signal['adx']:.1f}")
@@ -468,10 +471,14 @@ def scan_once(state: dict) -> None:
             save_alerted_bars(state)
             signals_count += 1
 
+            # 🛠️ التعديل الأول: تأخير ربع ثانية لحماية حسابك من الحظر البرمجي (Rate Limit)
+            time.sleep(0.25)
+
         except Exception as exc:
             print(f"Error {symbol}: {exc}")
             traceback.print_exc()
             rejected_count += 1
+            time.sleep(0.25)
 
     elapsed = time.monotonic() - start_time
     print(f"\n✅ Signals: {signals_count} | ❌ Rejected: {rejected_count} | ⏱ {elapsed:.1f}s\n")
@@ -485,6 +492,7 @@ def main() -> None:
 
     state = load_alerted_bars()
     last_heartbeat = 0.0
+    last_scan_minute = -1  # 🛠️ متغير لتتبع دقيقة الفحص الأخيرة
 
     while True:
         try:
@@ -494,16 +502,25 @@ def main() -> None:
                 last_heartbeat = now
 
             if is_market_open():
-                scan_once(state)
+                # 🛠️ التعديل الثاني: فحص الوقت بالدقائق والتشغيل عند إغلاق شمعة الـ 15 دقيقة فقط
+                current_time = datetime.now()
+                current_minute = current_time.minute
+
+                if current_minute % 15 == 0 and current_minute != last_scan_minute:
+                    print(f"⏰ [وقت إغلاق الشمعة]: {current_time.strftime('%H:%M:%S')} - جاري بدء الفحص الفعلي...")
+                    scan_once(state)
+                    last_scan_minute = current_minute
+
+                time.sleep(5)
             else:
                 print(f"[{datetime.now(timezone.utc).isoformat()}] السوق مغلق...")
+                time.sleep(POLL_SECONDS)
 
         except Exception as exc:
             print(f"Loop error: {exc}")
             traceback.print_exc()
             send_error_message(str(exc))
-
-        time.sleep(POLL_SECONDS)
+            time.sleep(POLL_SECONDS)
 
 if __name__ == "__main__":
     main()
