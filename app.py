@@ -463,12 +463,9 @@ def scan_once(state: dict) -> None:
                 time.sleep(0.25)
                 continue
 
-            print(
-    f"{symbol} | bars={len(df)} | "
-    f"last={df.index[-1]} | "
-    f"ema200={'ema200' in df.columns} | "
-    f"rsi={'rsi' in df.columns}"
-)
+            print(f"{symbol} columns: {list(df.columns)}")
+print(df.tail(3))
+            
             signal, reject_reason = evaluate_signal(df)
             if signal is None:
                 print(f"{symbol} {reject_reason}")
