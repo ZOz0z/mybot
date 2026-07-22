@@ -11,7 +11,7 @@ import os
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import pandas_ta as ta
 from dotenv import load_dotenv
@@ -22,6 +22,7 @@ from telegram.constants import ParseMode
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 
 load_dotenv()
@@ -106,10 +107,16 @@ def is_market_open() -> bool:
 def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
     try:
         client = get_data_client()
+        
+        # الرجوع 55 يوماً للخلف لضمان وجود 750 شمعة (15 دقيقة)
+        start_date = datetime.now(timezone.utc) - timedelta(days=55)
+
         request = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(TIMEFRAME_MINUTES, TimeFrameUnit.Minute),
+            start=start_date,
             limit=limit,
+            feed=DataFeed.IEX
         )
         bars = client.get_stock_bars(request)
 
@@ -119,14 +126,14 @@ def fetch_bars(symbol: str, limit: int = BARS_LOOKBACK) -> pd.DataFrame:
 
         df = bars.df
 
-        print(symbol, "rows from alpaca =", len(df))
-        print(df.tail(3))
-
         if isinstance(df.index, pd.MultiIndex):
             if symbol in df.index.get_level_values("symbol"):
                 df = df.xs(symbol, level="symbol")
             else:
                 return pd.DataFrame()
+
+        if len(df) > limit:
+            df = df.tail(limit)
 
         print(f"📊 {symbol} — عدد الشمعات المستلمة من Alpaca: {len(df)}")
 
