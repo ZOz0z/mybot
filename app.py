@@ -216,7 +216,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         return None, "شمعة بلا مدى"
     strong_candle = (close - open_price) > candle_range * 0.5
     if not strong_candle:
-        return None, "❌ الشمعة ليست قوية (أقل من 60% صعود)"
+        return None, "❌ الشمعة ليست قوية (أقل من 50% صعود)"
 
     # --- 2) شمعة مو كبيرة جداً ---
     candle_size_pct = candle_range / close
