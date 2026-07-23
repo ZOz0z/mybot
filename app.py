@@ -1,10 +1,11 @@
 """
 Sniper Bot — 15-minute long-setup scanner with Telegram alerts.
-Fully customized with strict breakout rules.
+Fully customized with strict breakout rules & deep diagnostic reporting.
 Engineered for Railway / Cloud deployment.
 """
 
 import asyncio
+from collections import Counter
 import json
 import logging
 import os
@@ -16,13 +17,13 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
-# توجيه مجلد الكاش إلى /tmp مباشرة لمنع تحذيرات الصلاحيات في Railway
+# توجيه مجلد الكاش إلى /tmp لمنع تحذيرات الصلاحيات في Railway
 yf.set_tz_cache_location("/tmp")
 
 from flask import Flask
 from telegram import Bot
 
-# إعداد السجلات
+# إعداد السجلات بشكل منظم
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # =============================================================================
@@ -46,7 +47,6 @@ _raw_tickers = [
 TICKERS = sorted(list(set(_raw_tickers)))
 
 TIMEFRAME_MINUTES = 15
-BARS_LOOKBACK = 750
 
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
@@ -75,31 +75,62 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), ".alert_state.json")
 PORT = int(os.environ.get("PORT", 8080))
 
 # =============================================================================
-# Data fetching via yfinance
+# Bulk Data Fetching via yfinance
 # =============================================================================
 
-def fetch_bars(symbol: str) -> pd.DataFrame:
+def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """جلب بيانات جميع الأسهم دفعة واحدة بطلب واحد أسرع يوفر الوقت"""
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="1mo", interval="15m")
+        tickers_str = " ".join(tickers_list)
+        data = yf.download(
+            tickers=tickers_str,
+            period="1mo",
+            interval="15m",
+            group_by="ticker",
+            progress=False,
+            auto_adjust=False
+        )
 
-        if df is None or df.empty:
-            return pd.DataFrame()
+        all_dfs = {}
+        missing_tickers = []
 
-        df.columns = [col.lower() for col in df.columns]
+        if data.empty:
+            return {}, tickers_list
 
-        required_cols = ["open", "high", "low", "close", "volume"]
-        if not all(col in df.columns for col in required_cols):
-            return pd.DataFrame()
+        if isinstance(data.columns, pd.MultiIndex):
+            for ticker in tickers_list:
+                if ticker in data.columns.levels[0]:
+                    df_ticker = data[ticker].copy()
+                    df_ticker.dropna(subset=["Close"], inplace=True)
+                    if not df_ticker.empty and len(df_ticker) >= 5:
+                        df_ticker.columns = [str(col).lower() for col in df_ticker.columns]
+                        req_cols = ["open", "high", "low", "close", "volume"]
+                        if all(col in df_ticker.columns for col in req_cols):
+                            all_dfs[ticker] = df_ticker[req_cols].sort_index()
+                        else:
+                            missing_tickers.append(ticker)
+                    else:
+                        missing_tickers.append(ticker)
+                else:
+                    missing_tickers.append(ticker)
+        else:
+            df_single = data.copy()
+            df_single.dropna(subset=["Close"], inplace=True)
+            df_single.columns = [str(col).lower() for col in df_single.columns]
+            req_cols = ["open", "high", "low", "close", "volume"]
+            if all(col in df_single.columns for col in req_cols):
+                all_dfs[tickers_list[0]] = df_single[req_cols].sort_index()
+            else:
+                missing_tickers.append(tickers_list[0])
 
-        return df[required_cols].sort_index()
+        return all_dfs, missing_tickers
 
     except Exception as e:
-        logging.error(f"❌ خطأ أثناء جلب بيانات {symbol}: {e}")
-        return pd.DataFrame()
+        logging.error(f"خطأ أثناء التحميل الجماعي للبيانات: {e}")
+        return {}, tickers_list
 
 # =============================================================================
-# Indicators
+# Indicators Computation
 # =============================================================================
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -128,7 +159,7 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     return cum_pv / cum_vol.replace(0, pd.NA)
 
 # =============================================================================
-# Signal evaluation
+# Signal Evaluation
 # =============================================================================
 
 def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
@@ -139,7 +170,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     missing = last_row[last_row.isna()]
 
     if not missing.empty:
-        return None, f"المؤشرات الناقصة: {list(missing.index)}"
+        return None, "مؤشرات ناقصة"
 
     last = df.iloc[-1]
     close = last["close"]
@@ -164,12 +195,12 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         return None, "شمعة بلا مدى"
     strong_candle = (close - open_price) > candle_range * 0.5
     if not strong_candle:
-        return None, "❌ الشمعة ليست قوية (أقل من 50% صعود)"
+        return None, "شمعة غير قوية (<50%)"
 
     # 2) شمعة ليست كبيرة جداً
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE:
-        return None, f"❌ شمعة عملاقة جداً ({candle_size_pct*100:.1f}%)"
+        return None, "شمعة عملاقة جداً (>6%)"
 
     # 3) فلتر الشمعتين الاستنزافيتين
     if len(df) >= 2:
@@ -182,71 +213,71 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             c1_body_pct = (last_2["close"].iloc[0] - last_2["open"].iloc[0]) / candle_1_range
             c2_body_pct = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / candle_2_range
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
-                return None, "❌ شمعتان استنزافيتان متتاليتان (>80% جسم)"
+                return None, "تتابع صعود عمودي استنزافي"
 
-    # 4) اختراق أعلى قمة 10 شمعات بمسافة أمان 0.2%
+    # 4) اختراق أعلى قمة 10 شمعات
     if len(df) < 12:
-        return None, "عدم توفر شمعات كافية للاختراق"
+        return None, "عدم توفر شمعات كافية"
     previous_10_bars = df.iloc[-11:-1]
     highest_of_last_10 = previous_10_bars["high"].max()
     target_breakout_price = highest_of_last_10 * 1.002
     if close <= target_breakout_price:
-        return None, f"❌ لم يتجاوز سعر الاختراق ({target_breakout_price:.2f})"
+        return None, "لم يتجاوز قمة 10 شمعات"
 
     # 5) سيولة وحيوية السهم
     dollar_volume = close * volume
     if dollar_volume < MIN_DOLLAR_VOLUME:
-        return None, f"❌ سيولة ضعيفة (${dollar_volume:,.0f})"
+        return None, "سيولة نقدية ضعيفة"
 
     atr_percent = atr / close
     if atr_percent < MIN_ATR_PCT:
-        return None, f"❌ حركة السهم ميتة ATR ({atr_percent*100:.2f}%)"
+        return None, "حركة السهم ميتة (ATR منخفض)"
 
     # 6) صعود اليوم لا يتجاوز 8%
     current_day = df.index[-1].date()
     day_bars = df[df.index.date == current_day]
     if day_bars.empty:
-        return None, "فشل العثور على افتتاح اليوم"
+        return None, "فشل تحديد افتتاح اليوم"
     daily_open = day_bars["open"].iloc[0]
     daily_return = (close - daily_open) / daily_open
     if daily_return > MAX_DAILY_RETURN:
-        return None, f"❌ صعود مفرط اليوم ({daily_return*100:.1f}%)"
+        return None, "صعود مفرط اليوم (>8%)"
 
     today_high = day_bars["high"].max()
     if close < today_high * DISTANCE_FROM_HIGH:
-        return None, "❌ بعيد عن أعلى سعر اليوم"
+        return None, "بعيد عن قمة اليوم"
 
     # 7) الاتجاه طويل الأجل EMA50 > EMA200
     if not (ema_slow > ema_long):
-        return None, "❌ ترند هابط EMA50 < EMA200"
+        return None, "ترند هابط (EMA50 < EMA200)"
 
     # 8) ترتيب المتوسطات EMA9 > EMA20 > EMA50
     if not (ema_fast > ema_mid > ema_slow):
-        return None, "❌ ترتيب المتوسطات خاطئ"
+        return None, "ترتيب المتوسطات خاطئ"
 
     # 9) السعر فوق EMA9 وفوق VWAP
     if not (close > ema_fast):
-        return None, "❌ الإغلاق تحت EMA9"
+        return None, "تحت خط EMA9"
     if not (close > vwap):
-        return None, "❌ الإغلاق تحت VWAP"
+        return None, "تحت خط VWAP"
 
     # 10) المسافة عن EMA9 أقل من 2%
     distance_from_ema9 = (close - ema_fast) / ema_fast
     if distance_from_ema9 > MAX_EMA9_DISTANCE:
-        return None, f"❌ بعيد عن EMA9 ({distance_from_ema9*100:.2f}%)"
+        return None, "بعيد عن EMA9 (>2%)"
 
     # 11) حجم التداول
     rvol = volume / avg_volume if avg_volume > 0 else 0
     if not (rvol > VOLUME_MULTIPLIER and volume > avg_volume):
-        return None, f"❌ حجم ضعيف (RVOL: {rvol:.2f}x)"
+        return None, "حجم سيولة ضعيف (RVOL منخفض)"
 
     # 12) RSI بين 55 و 75
     if not (RSI_MIN <= rsi <= RSI_MAX):
-        return None, f"❌ RSI خارج النطاق ({rsi:.1f})"
+        return None, f"RSI خارج النطاق ({rsi:.1f})"
 
     # 13) ADX بين 20 و 50
     if not (ADX_MIN <= adx <= ADX_MAX):
-        return None, f"❌ ADX خارج النطاق ({adx:.1f})"
+        return None, f"ADX خارج النطاق ({adx:.1f})"
 
     return {
         "bar_time": df.index[-1],
@@ -267,7 +298,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     }, None
 
 # =============================================================================
-# Telegram alerts
+# Telegram Alerts
 # =============================================================================
 
 _bot: Bot | None = None
@@ -304,7 +335,7 @@ def safe_run_async(coro):
     try:
         asyncio.run(coro)
     except Exception as e:
-        logging.error(f"Async execution error: {e}")
+        logging.error(f"خطأ تنفيذ التنفيذ اللاتزامني: {e}")
 
 def send_alert(symbol: str, signal: dict) -> None:
     safe_run_async(send_alert_async(symbol, signal))
@@ -320,13 +351,13 @@ def send_startup_message(watchlist_size, timeframe):
         text = (
             f"🤖 Sniper Bot شغال بنجاح!\n"
             f"يراقب {watchlist_size} سهم على الفريم {timeframe}m.\n"
-            f"13 شرط صارم مفعلة ✅"
+            f"13 شرط صارم مفعلة مع التقرير التشخيصي ✅"
         )
         await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
     try:
         safe_run_async(_send())
     except Exception as exc:
-        logging.error(f"Startup message failed: {exc}")
+        logging.error(f"فشل إرسال رسالة البداية: {exc}")
 
 def send_heartbeat() -> None:
     async def _send():
@@ -337,7 +368,7 @@ def send_heartbeat() -> None:
     try:
         safe_run_async(_send())
     except Exception as exc:
-        logging.error(f"Heartbeat failed: {exc}")
+        logging.error(f"فشل إرسال نبض الحياة: {exc}")
 
 def send_error_message(text: str) -> None:
     async def _send():
@@ -348,7 +379,7 @@ def send_error_message(text: str) -> None:
         pass
 
 # =============================================================================
-# Alert dedup state
+# Alert State Tracking
 # =============================================================================
 
 def load_alerted_bars() -> dict:
@@ -371,7 +402,7 @@ def mark_alerted(state: dict, symbol: str, bar_time_iso: str) -> None:
     state[symbol] = bar_time_iso
 
 # =============================================================================
-# Health-check server
+# Health Check Server
 # =============================================================================
 
 _health_app = Flask(__name__)
@@ -389,21 +420,17 @@ def start_health_server() -> None:
     thread.start()
 
 # =============================================================================
-# Market Hours & Main Loop
+# Main Scan Loop with Deep Reporting
 # =============================================================================
 
 def is_market_open() -> bool:
     """فحص ما إذا كان السوق الأمريكي مفتوحاً (بتوقيت UTC)"""
     now_utc = datetime.now(timezone.utc)
-    # عطلة نهاية الأسبوع (السبت والأحد)
     if now_utc.weekday() >= 5:
         return False
-    
-    # ساعات التداول الرئيسية (13:30 UTC إلى 20:00 UTC)
     market_start = now_utc.replace(hour=13, minute=30, second=0, microsecond=0)
     market_end = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
     return market_start <= now_utc <= market_end
-
 
 def check_credentials_soft() -> bool:
     missing = [
@@ -413,52 +440,81 @@ def check_credentials_soft() -> bool:
         ] if not value
     ]
     if missing:
-        logging.error(f"❌ خطأ: متغيرات البيئة التالية مفقودة: {', '.join(missing)}")
+        logging.error(f"متغيرات البيئة التالية مفقودة: {', '.join(missing)}")
         return False
     return True
 
 def scan_once(state: dict) -> None:
-    start_time = time.monotonic()
-    logging.info(f"📊 جلب بيانات {len(TICKERS)} سهماً عبر Yahoo Finance...")
+    t_total_start = time.monotonic()
+    logging.info(f"🔄 بدء الفحص الجماعي لـ {len(TICKERS)} سهماً...")
 
+    # 1) مرحلة التحميل الجماعي
+    t_download_start = time.monotonic()
+    all_dfs, missing_tickers = fetch_all_bars_bulk(TICKERS)
+    t_download_end = time.monotonic()
+    download_time = t_download_end - t_download_start
+
+    # 2) مرحلة التحليل والفلترة
+    t_analysis_start = time.monotonic()
     signals_count = 0
     rejected_count = 0
+    reasons_counter = Counter()
 
     for symbol in TICKERS:
-        try:
-            df = fetch_bars(symbol)
-            if df.empty or len(df) < 5:
-                rejected_count += 1
-                time.sleep(0.1)
-                continue
-
-            bar_time_iso = df.index[-1].isoformat()
-            if already_alerted(state, symbol, bar_time_iso):
-                rejected_count += 1
-                time.sleep(0.1)
-                continue
-
-            signal, reject_reason = evaluate_signal(df)
-            if signal is None:
-                rejected_count += 1
-                time.sleep(0.1)
-                continue
-
-            logging.info(f"✅ SIGNAL: {symbol} @ ${signal['close']:.2f} | RSI:{signal['rsi']:.1f} | ADX:{signal['adx']:.1f}")
-            send_alert(symbol, signal)
-            mark_alerted(state, symbol, bar_time_iso)
-            save_alerted_bars(state)
-            signals_count += 1
-
-            time.sleep(0.1)
-
-        except Exception as exc:
-            logging.error(f"Error {symbol}: {exc}")
+        if symbol in missing_tickers or symbol not in all_dfs:
+            reasons_counter["بيانات غير متوفرة من Yahoo"] += 1
             rejected_count += 1
-            time.sleep(0.1)
+            logging.info(f"  ❌ {symbol:<5} | بيانات غير متوفرة")
+            continue
 
-    elapsed = time.monotonic() - start_time
-    logging.info(f"✅ Signals: {signals_count} | ❌ Rejected: {rejected_count} | ⏱ {elapsed:.1f}s")
+        df = all_dfs[symbol]
+        bars_count = len(df)
+
+        bar_time_iso = df.index[-1].isoformat()
+        if already_alerted(state, symbol, bar_time_iso):
+            reasons_counter["تنبيه سابق لنفس الشمعة"] += 1
+            rejected_count += 1
+            logging.info(f"  ❌ {symbol:<5} | {bars_count} bars | تم التنبيه عنه سابقاً")
+            continue
+
+        signal, reject_reason = evaluate_signal(df)
+        if signal is None:
+            reasons_counter[reject_reason] += 1
+            rejected_count += 1
+            logging.info(f"  ❌ {symbol:<5} | {bars_count} bars | {reject_reason}")
+            continue
+
+        logging.info(f"  ✅ {symbol:<5} | {bars_count} bars | PASS (${signal['close']:.2f})")
+        send_alert(symbol, signal)
+        mark_alerted(state, symbol, bar_time_iso)
+        save_alerted_bars(state)
+        signals_count += 1
+
+    t_analysis_end = time.monotonic()
+    analysis_time = t_analysis_end - t_analysis_start
+    total_time = time.monotonic() - t_total_start
+
+    # 3) طباعة التقرير الشامل والمفصل
+    summary = []
+    summary.append("\n==========================================")
+    summary.append(f"📊 Scan Summary ({len(TICKERS)} Symbols)")
+    summary.append("==========================================")
+    summary.append(f"🟢 Signals Found : {signals_count}")
+    summary.append(f"🔴 Rejected      : {rejected_count}")
+    if missing_tickers:
+        summary.append(f"⚠️ Missing Data  : {len(missing_tickers)} -> ({', '.join(missing_tickers)})")
+    
+    summary.append("\n⏱️ Timing Breakdown:")
+    summary.append(f"  • Download Data : {download_time:.2f}s")
+    summary.append(f"  • Analysis Time : {analysis_time:.2f}s")
+    summary.append(f"  • Total Time    : {total_time:.2f}s")
+
+    summary.append("\n📋 Rejection Reasons Breakdown:")
+    for reason, count in reasons_counter.most_common():
+        summary.append(f"  • {reason:<32} {count}")
+    summary.append("==========================================\n")
+
+    logging.info("\n".join(summary))
 
 def main() -> None:
     start_health_server()
@@ -486,7 +542,7 @@ def main() -> None:
             current_time = datetime.now(timezone.utc)
             current_minute = current_time.minute
 
-            # الفحص فقط عند إغلاق الشمعة (كل 15 دقيقة: 00, 15, 30, 45)
+            # الفحص عند إغلاق شمعة الـ 15 دقيقة (00, 15, 30, 45)
             if current_minute % 15 == 0 and current_minute != last_scan_minute:
                 if is_market_open():
                     logging.info(f"⏰ [وقت إغلاق الشمعة {current_minute}m]: بدء الفحص الفعلي...")
@@ -496,10 +552,10 @@ def main() -> None:
                 
                 last_scan_minute = current_minute
 
-            time.sleep(10)  # تفقد كل 10 ثوانٍ للتحقق من الدقيقة
+            time.sleep(10)
 
         except Exception as exc:
-            logging.error(f"Loop error: {exc}")
+            logging.exception(f"خطأ في الحلقة الرئيسية: {exc}")
             send_error_message(str(exc))
             time.sleep(POLL_SECONDS)
 
