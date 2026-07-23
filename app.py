@@ -389,8 +389,21 @@ def start_health_server() -> None:
     thread.start()
 
 # =============================================================================
-# Main scan loop
+# Market Hours & Main Loop
 # =============================================================================
+
+def is_market_open() -> bool:
+    """فحص ما إذا كان السوق الأمريكي مفتوحاً (بتوقيت UTC)"""
+    now_utc = datetime.now(timezone.utc)
+    # عطلة نهاية الأسبوع (السبت والأحد)
+    if now_utc.weekday() >= 5:
+        return False
+    
+    # ساعات التداول الرئيسية (13:30 UTC إلى 20:00 UTC)
+    market_start = now_utc.replace(hour=13, minute=30, second=0, microsecond=0)
+    market_end = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
+    return market_start <= now_utc <= market_end
+
 
 def check_credentials_soft() -> bool:
     missing = [
@@ -456,11 +469,12 @@ def main() -> None:
         while True:
             time.sleep(3600)
 
-    logging.info(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على {TIMEFRAME_MINUTES}m...")
+    logging.info(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على فريم {TIMEFRAME_MINUTES} دقيقة...")
     send_startup_message(len(TICKERS), TIMEFRAME_MINUTES)
 
     state = load_alerted_bars()
     last_heartbeat = 0.0
+    last_scan_minute = -1
 
     while True:
         try:
@@ -469,8 +483,20 @@ def main() -> None:
                 send_heartbeat()
                 last_heartbeat = now
 
-            scan_once(state)
-            time.sleep(POLL_SECONDS)
+            current_time = datetime.now(timezone.utc)
+            current_minute = current_time.minute
+
+            # الفحص فقط عند إغلاق الشمعة (كل 15 دقيقة: 00, 15, 30, 45)
+            if current_minute % 15 == 0 and current_minute != last_scan_minute:
+                if is_market_open():
+                    logging.info(f"⏰ [وقت إغلاق الشمعة {current_minute}m]: بدء الفحص الفعلي...")
+                    scan_once(state)
+                else:
+                    logging.info(f"💤 [الدقيقة {current_minute}]: السوق مغلق حالياً...")
+                
+                last_scan_minute = current_minute
+
+            time.sleep(10)  # تفقد كل 10 ثوانٍ للتحقق من الدقيقة
 
         except Exception as exc:
             logging.error(f"Loop error: {exc}")
