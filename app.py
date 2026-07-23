@@ -162,7 +162,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     # --- 1) شمعة صاعدة قوية ---
     candle_range = high - low
     if candle_range == 0: 
-        return None, "شمعة بلا مدى سعري"
+        return None, "شمعة بلا مدى سعرى"
     if (close - open_price) <= candle_range * 0.5: 
         return None, "❌ الشمعة ليست قوية"
 
@@ -189,8 +189,8 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
                 return None, "❌ تتابع صعود عمودي استنزافي حاد"
 
-    # --- 4) فلاتر الزخم والاتجاه المؤسساتي ---
-    if not (rsi_min <= rsi <= rsi_max): 
+    # --- 4) فلاتر الزخم والاتجاه المؤسساتي (تم تصحيح أسماء الحروف الكبيرة هنا) ---
+    if not (RSI_MIN <= rsi <= RSI_MAX): 
         return None, f"❌ RSI خارج النطاق المطلوب ({rsi:.1f})"
         
     if not (ema_fast > ema_mid > ema_slow > ema_long): 
@@ -202,7 +202,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if volume < (avg_volume * VOLUME_MULTIPLIER): 
         return None, f"❌ حجم السيولة الحالي أقل من المتوسط المطلق"
         
-    if not (adx_min <= adx <= adx_max): 
+    if not (ADX_MIN <= adx <= ADX_MAX): 
         return None, f"❌ مؤشر قوة الاتجاه ADX غير مثالي ({adx:.1f})"
     
     # فلتر السيولة النقدية بالشمعة بالدولار
