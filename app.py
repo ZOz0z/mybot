@@ -171,7 +171,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if candle_size_pct > MAX_CANDLE_RANGE: 
         return None, f"❌ شمعة متفجرة بشكل مفرط وعملاقة ({candle_size_pct*100:.1f}%)"
 
-    # --- 3) فلتر الشمعتين الاستنزافيتين (تم إصلاح أقواس الـ iloc هنا) ---
+    # --- 3) فلتر الشمعتين الاستنزافيتين ---
     if len(df) >= 2:
         c1_row = df.iloc[-2]
         c2_row = df.iloc[-1]
@@ -190,7 +190,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
                 return None, "❌ تتابع صعود عمودي استنزافي حاد"
 
     # --- 4) فلاتر الزخم والاتجاه المؤسساتي ---
-    if not (RSI_MIN <= rsi <= RSI_MAX): 
+    if not (rsi_min <= rsi <= rsi_max): 
         return None, f"❌ RSI خارج النطاق المطلوب ({rsi:.1f})"
         
     if not (ema_fast > ema_mid > ema_slow > ema_long): 
@@ -202,7 +202,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if volume < (avg_volume * VOLUME_MULTIPLIER): 
         return None, f"❌ حجم السيولة الحالي أقل من المتوسط المطلق"
         
-    if not (ADX_MIN <= adx <= ADX_MAX): 
+    if not (adx_min <= adx <= adx_max): 
         return None, f"❌ مؤشر قوة الاتجاه ADX غير مثالي ({adx:.1f})"
     
     # فلتر السيولة النقدية بالشمعة بالدولار
