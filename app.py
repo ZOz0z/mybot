@@ -15,6 +15,8 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
+# توجيه مجلد الكاش إلى /tmp لمنع تحذيرات الصلاحيات في Railway
+yf.set_tz_cache_location("/tmp/py-yfinance")
 from flask import Flask
 from telegram import Bot
 from telegram.constants import ParseMode
