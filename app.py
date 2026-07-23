@@ -1,7 +1,7 @@
-""" Sniper Bot — Yahoo Finance 15-minute long-setup scanner with Telegram alerts.
-Fully customized with Abdulaziz's ultra-strict, institutional-grade breakout rules.
-Optimized Settings: Powered by Yahoo Finance for fast, bulk market data retrieval.
-Watchlist: Fully merged with newly added tickers, dynamically de-duplicated.
+"""
+Sniper Bot — 15-minute long-setup scanner with Telegram alerts.
+Fully customized with strict breakout rules.
+Engineered for Railway / Cloud deployment.
 """
 
 import asyncio
@@ -15,16 +15,18 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
-# توجيه مجلد الكاش إلى /tmp لمنع تحذيرات الصلاحيات في Railway
-yf.set_tz_cache_location("/tmp/py-yfinance")
+
+# توجيه مجلد الكاش إلى /tmp مباشرة لمنع تحذيرات الصلاحيات في Railway
+yf.set_tz_cache_location("/tmp")
+
 from flask import Flask
 from telegram import Bot
-from telegram.constants import ParseMode
 
+# إعداد السجلات
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # =============================================================================
-# Configuration & Environment Variables
+# Configuration
 # =============================================================================
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -40,10 +42,11 @@ _raw_tickers = [
     "OUST", "AEHR", "ACLS", "CAMT", "PDFS", "FORM", "AMKR", "VECO", "VIAV", "S",
     "DOCN", "ENPH", "SEDG", "MRVL", "MTSI", "ALGM", "COHR", "AAOI", "CARG"
 ]
+
 TICKERS = sorted(list(set(_raw_tickers)))
 
-TIMEFRAME = "15m"
-PERIOD_LOOKBACK = "30d"
+TIMEFRAME_MINUTES = 15
+BARS_LOOKBACK = 750
 
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
@@ -71,59 +74,32 @@ HEARTBEAT_SECONDS = 14400
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".alert_state.json")
 PORT = int(os.environ.get("PORT", 8080))
 
-
 # =============================================================================
-# Yahoo Finance Bulk Data Access
+# Data fetching via yfinance
 # =============================================================================
 
-def fetch_all_bars_yf(tickers_list: list) -> dict[str, pd.DataFrame]:
+def fetch_bars(symbol: str) -> pd.DataFrame:
     try:
-        logging.info(f"🔄 جلب بيانات {len(tickers_list)} سهماً بشكل جماعي من Yahoo Finance...")
-        tickers_str = " ".join(tickers_list)
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1mo", interval="15m")
 
-        data = yf.download(
-            tickers=tickers_str,
-            period=PERIOD_LOOKBACK,
-            interval=TIMEFRAME,
-            group_by='ticker',
-            progress=False,
-            auto_adjust=False
-        )
+        if df is None or df.empty:
+            return pd.DataFrame()
 
-        all_dfs = {}
-        if data.empty:
-            return all_dfs
+        df.columns = [col.lower() for col in df.columns]
 
-        if isinstance(data.columns, pd.MultiIndex):
-            for ticker in tickers_list:
-                if ticker in data.columns.levels[0]:
-                    df_ticker = data[ticker].copy()
-                    df_ticker.dropna(subset=["Close"], inplace=True)
+        required_cols = ["open", "high", "low", "close", "volume"]
+        if not all(col in df.columns for col in required_cols):
+            return pd.DataFrame()
 
-                    if df_ticker.empty or len(df_ticker) < 20:
-                        continue
+        return df[required_cols].sort_index()
 
-                    df_ticker.columns = [str(col).lower() for col in df_ticker.columns]
-                    required_cols = ["open", "high", "low", "close", "volume"]
-                    if all(col in df_ticker.columns for col in required_cols):
-                        all_dfs[ticker] = df_ticker[required_cols].sort_index()
-        else:
-            # حالة وجود سهم واحد فقط
-            df_single = data.copy()
-            df_single.dropna(subset=["Close"], inplace=True)
-            df_single.columns = [str(col).lower() for col in df_single.columns]
-            required_cols = ["open", "high", "low", "close", "volume"]
-            if all(col in df_single.columns for col in required_cols):
-                all_dfs[tickers_list[0]] = df_single[required_cols].sort_index()
-
-        return all_dfs
     except Exception as e:
-        logging.error(f"❌ خطأ أثناء جلب البيانات الجماعية من Yahoo Finance: {e}")
-        return {}
-
+        logging.error(f"❌ خطأ أثناء جلب بيانات {symbol}: {e}")
+        return pd.DataFrame()
 
 # =============================================================================
-# Technical Indicators Computation
+# Indicators
 # =============================================================================
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,7 +112,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vwap"] = _daily_vwap(df)
     df["avg_volume"] = df["volume"].rolling(window=VOLUME_AVG_PERIOD).mean()
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
-
     adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
     if adx_df is not None and "ADX_14" in adx_df.columns:
         df["adx"] = adx_df["ADX_14"]
@@ -152,20 +127,17 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     cum_vol = df["volume"].groupby(day_key).cumsum()
     return cum_pv / cum_vol.replace(0, pd.NA)
 
-
 # =============================================================================
-# Signal Evaluation (Abdulaziz's 13 Strict Rules)
+# Signal evaluation
 # =============================================================================
 
 def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
-    if len(df) < 50:
-        return None, "بيانات غير كافية لحساب المؤشرات الفنية"
-
     df = compute_indicators(df)
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
 
     last_row = df[needed_cols].iloc[-1]
     missing = last_row[last_row.isna()]
+
     if not missing.empty:
         return None, f"المؤشرات الناقصة: {list(missing.index)}"
 
@@ -186,20 +158,20 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     ema_slow = last[f"ema{EMA_SLOW}"]
     ema_long = last[f"ema{EMA_LONG}"]
 
-    # --- 1) شمعة صاعدة قوية 60% ---
+    # 1) شمعة صاعدة قوية 60%
     candle_range = high - low
     if candle_range == 0:
         return None, "شمعة بلا مدى"
-    strong_candle = (close - open_price) > candle_range * 0.5
+    strong_candle = (close - open_price) > candle_range * 0.6
     if not strong_candle:
-        return None, "❌ الشمعة ليست قوية (أقل من 50% صعود)"
+        return None, "❌ الشمعة ليست قوية (أقل من 60% صعود)"
 
-    # --- 2) شمعة مو كبيرة جداً ---
+    # 2) شمعة ليست كبيرة جداً
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE:
         return None, f"❌ شمعة عملاقة جداً ({candle_size_pct*100:.1f}%)"
 
-    # --- 3) فلتر الشمعتين الاستنزافيتين ---
+    # 3) فلتر الشمعتين الاستنزافيتين
     if len(df) >= 2:
         last_2 = df.iloc[-2:]
         candle_1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
@@ -212,7 +184,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
                 return None, "❌ شمعتان استنزافيتان متتاليتان (>80% جسم)"
 
-    # --- 4) اختراق أعلى قمة 10 شمعات بمسافة أمان 0.2% ---
+    # 4) اختراق أعلى قمة 10 شمعات بمسافة أمان 0.2%
     if len(df) < 12:
         return None, "عدم توفر شمعات كافية للاختراق"
     previous_10_bars = df.iloc[-11:-1]
@@ -221,7 +193,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if close <= target_breakout_price:
         return None, f"❌ لم يتجاوز سعر الاختراق ({target_breakout_price:.2f})"
 
-    # --- 5) سيولة وحيوية السهم ---
+    # 5) سيولة وحيوية السهم
     dollar_volume = close * volume
     if dollar_volume < MIN_DOLLAR_VOLUME:
         return None, f"❌ سيولة ضعيفة (${dollar_volume:,.0f})"
@@ -230,7 +202,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if atr_percent < MIN_ATR_PCT:
         return None, f"❌ حركة السهم ميتة ATR ({atr_percent*100:.2f}%)"
 
-    # --- 6) صعود اليوم لا يتجاوز 8% ---
+    # 6) صعود اليوم لا يتجاوز 8%
     current_day = df.index[-1].date()
     day_bars = df[df.index.date == current_day]
     if day_bars.empty:
@@ -244,35 +216,35 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if close < today_high * DISTANCE_FROM_HIGH:
         return None, "❌ بعيد عن أعلى سعر اليوم"
 
-    # --- 7) الاتجاه طويل الأجل EMA50 > EMA200 ---
+    # 7) الاتجاه طويل الأجل EMA50 > EMA200
     if not (ema_slow > ema_long):
         return None, "❌ ترند هابط EMA50 < EMA200"
 
-    # --- 8) ترتيب المتوسطات EMA9 > EMA20 > EMA50 ---
+    # 8) ترتيب المتوسطات EMA9 > EMA20 > EMA50
     if not (ema_fast > ema_mid > ema_slow):
         return None, "❌ ترتيب المتوسطات خاطئ"
 
-    # --- 9) السعر فوق EMA9 وفوق VWAP ---
+    # 9) السعر فوق EMA9 وفوق VWAP
     if not (close > ema_fast):
         return None, "❌ الإغلاق تحت EMA9"
     if not (close > vwap):
         return None, "❌ الإغلاق تحت VWAP"
 
-    # --- 10) المسافة عن EMA9 أقل من 2% ---
+    # 10) المسافة عن EMA9 أقل من 2%
     distance_from_ema9 = (close - ema_fast) / ema_fast
     if distance_from_ema9 > MAX_EMA9_DISTANCE:
         return None, f"❌ بعيد عن EMA9 ({distance_from_ema9*100:.2f}%)"
 
-    # --- 11) حجم التداول ---
+    # 11) حجم التداول
     rvol = volume / avg_volume if avg_volume > 0 else 0
     if not (rvol > VOLUME_MULTIPLIER and volume > avg_volume):
         return None, f"❌ حجم ضعيف (RVOL: {rvol:.2f}x)"
 
-    # --- 12) RSI بين 55 و 75 ---
+    # 12) RSI بين 55 و 75
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return None, f"❌ RSI خارج النطاق ({rsi:.1f})"
 
-    # --- 13) ADX بين 20 و 50 ---
+    # 13) ADX بين 20 و 50
     if not (ADX_MIN <= adx <= ADX_MAX):
         return None, f"❌ ADX خارج النطاق ({adx:.1f})"
 
@@ -294,9 +266,8 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         "distance_ema9": float(distance_from_ema9 * 100)
     }, None
 
-
 # =============================================================================
-# Telegram Alerts & Messaging
+# Telegram alerts
 # =============================================================================
 
 _bot: Bot | None = None
@@ -309,37 +280,31 @@ def _get_bot() -> Bot:
 
 def format_signal_message(symbol: str, signal: dict) -> str:
     bar_time = signal["bar_time"]
-    bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M") if isinstance(bar_time, datetime) else str(bar_time)
+    bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M UTC") if isinstance(bar_time, datetime) else str(bar_time)
+    
     return (
-        f"🎯 *SNIPER BREAKOUT* — `{symbol}`\n"
-        f"_15m bar closed {bar_time_str}_\n"
-        f"\n"
-        f"💵 *سعر الدخول:* `${signal['close']:.2f}`\n"
-        f"🚀 *صعود اليوم:* `+{signal['daily_return']:.2f}%` ✅\n"
-        f"📈 *الترند:* EMA9 \\> EMA20 \\> EMA50 ✅\n"
-        f"🛡 *طويل الأجل:* EMA50 \\> EMA200 ✅\n"
-        f"📍 *VWAP:* `${signal['vwap']:.2f}` ✅\n"
-        f"📏 *بُعد EMA9:* `{signal['distance_ema9']:.2f}%` ✅\n"
-        f"📊 *RVOL:* `{signal['volume'] / signal['avg_volume']:.2f}x` ✅\n"
-        f"💰 *Dollar Volume:* `${signal['dollar_volume']:,.0f}` ✅\n"
-        f"⚡ *RSI:* `{signal['rsi']:.1f}` ✅\n"
-        f"🔥 *ADX:* `{signal['adx']:.1f}` ✅\n"
-        f"🔳 *اختراق 10 شمعات:* فوق `${signal['highest_of_last_10']:.2f}` ✅\n"
-        f"\n"
-        f"⚠️ _تحقق من الشارت قبل الدخول\\._"
+        f"🎯 SNIPER BREAKOUT — {symbol}\n"
+        f"سهم: {symbol}\n"
+        f"الوقت: {bar_time_str}\n\n"
+        f"💵 سعر الدخول: ${signal['close']:.2f}\n"
+        f"🚀 صعود اليوم: +{signal['daily_return']:.2f}%\n"
+        f"📈 الترند: EMA9 > EMA20 > EMA50 ✅\n"
+        f"🛡 طويل الأجل: EMA50 > EMA200 ✅\n"
+        f"📍 VWAP: ${signal['vwap']:.2f} ✅\n"
+        f"📏 بُعد EMA9: {signal['distance_ema9']:.2f}%\n"
+        f"📊 RVOL: {signal['volume'] / signal['avg_volume']:.2f}x\n"
+        f"💰 Dollar Volume: ${signal['dollar_volume']:,.0f}\n"
+        f"⚡ RSI: {signal['rsi']:.1f}\n"
+        f"🔥 ADX: {signal['adx']:.1f}\n"
+        f"🔳 اختراق 10 شمعات: فوق ${signal['highest_of_last_10']:.2f}\n\n"
+        f"⚠️ تحقق من الشارت قبل الدخول."
     )
 
 def safe_run_async(coro):
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    if loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result()
-    else:
-        return loop.run_until_complete(coro)
+        asyncio.run(coro)
+    except Exception as e:
+        logging.error(f"Async execution error: {e}")
 
 def send_alert(symbol: str, signal: dict) -> None:
     safe_run_async(send_alert_async(symbol, signal))
@@ -347,18 +312,17 @@ def send_alert(symbol: str, signal: dict) -> None:
 async def send_alert_async(symbol: str, signal: dict) -> None:
     await _get_bot().send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text=format_signal_message(symbol, signal),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        text=format_signal_message(symbol, signal)
     )
 
 def send_startup_message(watchlist_size, timeframe):
     async def _send():
         text = (
-            f"🤖 *Sniper Bot (Yahoo Finance) شغال*\n"
-            f"يراقب `{watchlist_size}` سهم على `{timeframe}`\\.\n"
-            f"13 شرط صارم للإشارة المثالية ✅"
+            f"🤖 Sniper Bot شغال بنجاح!\n"
+            f"يراقب {watchlist_size} سهم على الفريم {timeframe}m.\n"
+            f"13 شرط صارم مفعلة ✅"
         )
-        await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2)
+        await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
     try:
         safe_run_async(_send())
     except Exception as exc:
@@ -368,7 +332,7 @@ def send_heartbeat() -> None:
     async def _send():
         await _get_bot().send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=f"✅ Sniper Bot شغال ويراقب {len(TICKERS)} سهم بواسطة Yahoo Finance.",
+            text=f"✅ Sniper Bot شغال ويراقب {len(TICKERS)} سهم.",
         )
     try:
         safe_run_async(_send())
@@ -383,9 +347,8 @@ def send_error_message(text: str) -> None:
     except Exception:
         pass
 
-
 # =============================================================================
-# Alert State Tracking (De-duplication)
+# Alert dedup state
 # =============================================================================
 
 def load_alerted_bars() -> dict:
@@ -407,9 +370,8 @@ def already_alerted(state: dict, symbol: str, bar_time_iso: str) -> bool:
 def mark_alerted(state: dict, symbol: str, bar_time_iso: str) -> None:
     state[symbol] = bar_time_iso
 
-
 # =============================================================================
-# Health Check Server Setup
+# Health-check server
 # =============================================================================
 
 _health_app = Flask(__name__)
@@ -417,7 +379,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 @_health_app.route("/")
 def _alive():
-    return {"status": "healthy", "bot": "Sniper Scanner Running with Yahoo Finance Data"}, 200
+    return "I am alive"
 
 def start_health_server() -> None:
     thread = threading.Thread(
@@ -426,9 +388,8 @@ def start_health_server() -> None:
     )
     thread.start()
 
-
 # =============================================================================
-# Main Scan Loop
+# Main scan loop
 # =============================================================================
 
 def check_credentials_soft() -> bool:
@@ -445,68 +406,61 @@ def check_credentials_soft() -> bool:
 
 def scan_once(state: dict) -> None:
     start_time = time.monotonic()
-    print("\n=========================")
-    print(f"Starting scan with Yahoo Finance... ({len(TICKERS)} stocks)")
-    print("=========================")
+    logging.info(f"📊 جلب بيانات {len(TICKERS)} سهماً عبر Yahoo Finance...")
 
     signals_count = 0
     rejected_count = 0
 
-    all_dfs = fetch_all_bars_yf(TICKERS)
-
     for symbol in TICKERS:
         try:
-            if symbol not in all_dfs:
-                print(f"{symbol} ❌ لا توجد بيانات مرجعة من Yahoo Finance")
-                rejected_count += 1
-                continue
-
-            df = all_dfs[symbol]
+            df = fetch_bars(symbol)
             if df.empty or len(df) < 5:
-                print(f"{symbol} ❌ بيانات شمعات غير كافية")
                 rejected_count += 1
+                time.sleep(0.1)
                 continue
 
             bar_time_iso = df.index[-1].isoformat()
             if already_alerted(state, symbol, bar_time_iso):
                 rejected_count += 1
+                time.sleep(0.1)
                 continue
 
             signal, reject_reason = evaluate_signal(df)
             if signal is None:
-                print(f"{symbol} {reject_reason}")
                 rejected_count += 1
+                time.sleep(0.1)
                 continue
 
-            print(f"\n✅ SIGNAL: {symbol} @ ${signal['close']:.2f} | RSI:{signal['rsi']:.1f} | ADX:{signal['adx']:.1f}")
+            logging.info(f"✅ SIGNAL: {symbol} @ ${signal['close']:.2f} | RSI:{signal['rsi']:.1f} | ADX:{signal['adx']:.1f}")
             send_alert(symbol, signal)
             mark_alerted(state, symbol, bar_time_iso)
             save_alerted_bars(state)
             signals_count += 1
 
+            time.sleep(0.1)
+
         except Exception as exc:
-            print(f"Error {symbol}: {exc}")
-            traceback.print_exc()
+            logging.error(f"Error {symbol}: {exc}")
             rejected_count += 1
+            time.sleep(0.1)
 
     elapsed = time.monotonic() - start_time
-    print(f"\n✅ Signals: {signals_count} | ❌ Rejected: {rejected_count} | ⏱ {elapsed:.1f}s\n")
+    logging.info(f"✅ Signals: {signals_count} | ❌ Rejected: {rejected_count} | ⏱ {elapsed:.1f}s")
 
 def main() -> None:
     start_health_server()
-    print("🌐 تم تشغيل خادم الصحة (Health Check Server) بنجاح.")
+    logging.info("🌐 تم تشغيل خادم الصحة (Health Check Server) بنجاح.")
 
     if not check_credentials_soft():
-        print("⚠️ يرجى إضافة متغيرات التليجرام في Railway للبدء بالفحص.")
+        logging.warning("⚠️ يرجى إضافة المتغيرات المفقودة في Railway للبدء بالفحص.")
         while True:
             time.sleep(3600)
 
-    print(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على {TIMEFRAME} من Yahoo Finance...")
-    send_startup_message(len(TICKERS), TIMEFRAME)
+    logging.info(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على {TIMEFRAME_MINUTES}m...")
+    send_startup_message(len(TICKERS), TIMEFRAME_MINUTES)
 
     state = load_alerted_bars()
     last_heartbeat = 0.0
-    last_scan_minute = -1
 
     while True:
         try:
@@ -515,20 +469,11 @@ def main() -> None:
                 send_heartbeat()
                 last_heartbeat = now
 
-            current_time = datetime.now()
-            current_minute = current_time.minute
-
-            # الفحص عند دقيقة إغلاق شمعات الـ 15 دقيقة (00, 15, 30, 45)
-            if current_minute % 15 == 0 and current_minute != last_scan_minute:
-                print(f"⏰ [وقت إغلاق الشمعة]: {current_time.strftime('%H:%M:%S')} - جاري بدء الفحص الجماعي...")
-                scan_once(state)
-                last_scan_minute = current_minute
-
-            time.sleep(5)
+            scan_once(state)
+            time.sleep(POLL_SECONDS)
 
         except Exception as exc:
-            print(f"Loop error: {exc}")
-            traceback.print_exc()
+            logging.error(f"Loop error: {exc}")
             send_error_message(str(exc))
             time.sleep(POLL_SECONDS)
 
