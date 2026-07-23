@@ -1,6 +1,6 @@
 """
 Sniper Bot — 15-minute long-setup scanner with Telegram alerts.
-Fully customized with strict breakout rules & deep diagnostic reporting.
+Customized output report, Filter Statistics, and DEBUG mode control.
 Engineered for Railway / Cloud deployment.
 """
 
@@ -11,8 +11,7 @@ import logging
 import os
 import threading
 import time
-import traceback
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
@@ -23,15 +22,18 @@ yf.set_tz_cache_location("/tmp")
 from flask import Flask
 from telegram import Bot
 
-# إعداد السجلات بشكل منظم
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# =============================================================================
+# Configuration & Controls
+# =============================================================================
 
-# =============================================================================
-# Configuration
-# =============================================================================
+# وضع التصحيح: اجعله False لطباعة الملخص فقط، أو True لطباعة تفاصيل كل سهم
+DEBUG = False
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# إعداد السجلات
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 _raw_tickers = [
     "RIVN", "NIO", "PLUG", "SOUN", "XPEV", "RIOT", "AMD", "INTC", "OPEN", "PATH",
@@ -48,6 +50,8 @@ TICKERS = sorted(list(set(_raw_tickers)))
 
 TIMEFRAME_MINUTES = 15
 
+# إعدادات الفلاتر
+CANDLE_BODY_MIN = 0.5     # تم خفضها إلى 0.5 (50%)
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
@@ -79,7 +83,6 @@ PORT = int(os.environ.get("PORT", 8080))
 # =============================================================================
 
 def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], list[str]]:
-    """جلب بيانات جميع الأسهم دفعة واحدة بطلب واحد أسرع يوفر الوقت"""
     try:
         tickers_str = " ".join(tickers_list)
         data = yf.download(
@@ -126,11 +129,11 @@ def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], li
         return all_dfs, missing_tickers
 
     except Exception as e:
-        logging.error(f"خطأ أثناء التحميل الجماعي للبيانات: {e}")
+        logging.error(f"خطأ أثناء التحميل الجماعي: {e}")
         return {}, tickers_list
 
 # =============================================================================
-# Indicators Computation
+# Indicators & Signal Evaluation
 # =============================================================================
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -158,19 +161,24 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     cum_vol = df["volume"].groupby(day_key).cumsum()
     return cum_pv / cum_vol.replace(0, pd.NA)
 
-# =============================================================================
-# Signal Evaluation
-# =============================================================================
-
-def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
+def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
     df = compute_indicators(df)
     needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
 
     last_row = df[needed_cols].iloc[-1]
     missing = last_row[last_row.isna()]
 
+    filter_stats = {
+        "EMA Trend": False,
+        "VWAP": False,
+        "RSI": False,
+        "ADX": False,
+        "Volume": False,
+        "Breakout": False
+    }
+
     if not missing.empty:
-        return None, "مؤشرات ناقصة"
+        return None, "Missing Indicators", filter_stats
 
     last = df.iloc[-1]
     close = last["close"]
@@ -189,20 +197,48 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     ema_slow = last[f"ema{EMA_SLOW}"]
     ema_long = last[f"ema{EMA_LONG}"]
 
-    # 1) شمعة صاعدة قوية 60%
+    # 10 شمعات
+    previous_10_bars = df.iloc[-11:-1] if len(df) >= 12 else df.iloc[:-1]
+    highest_of_last_10 = previous_10_bars["high"].max() if not previous_10_bars.empty else high
+    target_breakout_price = highest_of_last_10 * 1.002
+
+    # فحص الفلاتر بشكل فردي للإحصائيات
+    if (ema_slow > ema_long) and (ema_fast > ema_mid > ema_slow) and (close > ema_fast):
+        filter_stats["EMA Trend"] = True
+
+    if close > vwap:
+        filter_stats["VWAP"] = True
+
+    if RSI_MIN <= rsi <= RSI_MAX:
+        filter_stats["RSI"] = True
+
+    if ADX_MIN <= adx <= ADX_MAX:
+        filter_stats["ADX"] = True
+
+    dollar_volume = close * volume
+    rvol = volume / avg_volume if avg_volume > 0 else 0
+    if (rvol > VOLUME_MULTIPLIER) and (volume > avg_volume) and (dollar_volume >= MIN_DOLLAR_VOLUME):
+        filter_stats["Volume"] = True
+
+    if close > target_breakout_price:
+        filter_stats["Breakout"] = True
+
+    # -------------------------------------------------------------
+    # شروط الرفض التسلسلية
+    # -------------------------------------------------------------
     candle_range = high - low
     if candle_range == 0:
-        return None, "شمعة بلا مدى"
-    strong_candle = (close - open_price) > candle_range * 0.5
-    if not strong_candle:
-        return None, "شمعة غير قوية (<50%)"
+        return None, "No Range Candle", filter_stats
 
-    # 2) شمعة ليست كبيرة جداً
+    # شمعة صاعدة قوية >= 50%
+    strong_candle = (close - open_price) > candle_range * CANDLE_BODY_MIN
+    if not strong_candle:
+        return None, "Candle <50%", filter_stats
+
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE:
-        return None, "شمعة عملاقة جداً (>6%)"
+        return None, "Large Candle (>6%)", filter_stats
 
-    # 3) فلتر الشمعتين الاستنزافيتين
     if len(df) >= 2:
         last_2 = df.iloc[-2:]
         candle_1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
@@ -213,71 +249,59 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             c1_body_pct = (last_2["close"].iloc[0] - last_2["open"].iloc[0]) / candle_1_range
             c2_body_pct = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / candle_2_range
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
-                return None, "تتابع صعود عمودي استنزافي"
+                return None, "Exhaustion Candles", filter_stats
 
-    # 4) اختراق أعلى قمة 10 شمعات
     if len(df) < 12:
-        return None, "عدم توفر شمعات كافية"
-    previous_10_bars = df.iloc[-11:-1]
-    highest_of_last_10 = previous_10_bars["high"].max()
-    target_breakout_price = highest_of_last_10 * 1.002
-    if close <= target_breakout_price:
-        return None, "لم يتجاوز قمة 10 شمعات"
+        return None, "Insufficient Bars", filter_stats
 
-    # 5) سيولة وحيوية السهم
-    dollar_volume = close * volume
+    if close <= target_breakout_price:
+        return None, "Breakout Failed", filter_stats
+
     if dollar_volume < MIN_DOLLAR_VOLUME:
-        return None, "سيولة نقدية ضعيفة"
+        return None, "Low Dollar Volume", filter_stats
 
     atr_percent = atr / close
     if atr_percent < MIN_ATR_PCT:
-        return None, "حركة السهم ميتة (ATR منخفض)"
+        return None, "Low ATR", filter_stats
 
-    # 6) صعود اليوم لا يتجاوز 8%
     current_day = df.index[-1].date()
     day_bars = df[df.index.date == current_day]
     if day_bars.empty:
-        return None, "فشل تحديد افتتاح اليوم"
+        return None, "Daily Open Fail", filter_stats
+
     daily_open = day_bars["open"].iloc[0]
     daily_return = (close - daily_open) / daily_open
     if daily_return > MAX_DAILY_RETURN:
-        return None, "صعود مفرط اليوم (>8%)"
+        return None, "Excessive Return (>8%)", filter_stats
 
     today_high = day_bars["high"].max()
     if close < today_high * DISTANCE_FROM_HIGH:
-        return None, "بعيد عن قمة اليوم"
+        return None, "Far From High", filter_stats
 
-    # 7) الاتجاه طويل الأجل EMA50 > EMA200
     if not (ema_slow > ema_long):
-        return None, "ترند هابط (EMA50 < EMA200)"
+        return None, "EMA50 < EMA200", filter_stats
 
-    # 8) ترتيب المتوسطات EMA9 > EMA20 > EMA50
     if not (ema_fast > ema_mid > ema_slow):
-        return None, "ترتيب المتوسطات خاطئ"
+        return None, "EMA Order Wrong", filter_stats
 
-    # 9) السعر فوق EMA9 وفوق VWAP
     if not (close > ema_fast):
-        return None, "تحت خط EMA9"
-    if not (close > vwap):
-        return None, "تحت خط VWAP"
+        return None, "Below EMA9", filter_stats
 
-    # 10) المسافة عن EMA9 أقل من 2%
+    if not (close > vwap):
+        return None, "Below VWAP", filter_stats
+
     distance_from_ema9 = (close - ema_fast) / ema_fast
     if distance_from_ema9 > MAX_EMA9_DISTANCE:
-        return None, "بعيد عن EMA9 (>2%)"
+        return None, "Far From EMA9 (>2%)", filter_stats
 
-    # 11) حجم التداول
-    rvol = volume / avg_volume if avg_volume > 0 else 0
     if not (rvol > VOLUME_MULTIPLIER and volume > avg_volume):
-        return None, "حجم سيولة ضعيف (RVOL منخفض)"
+        return None, "Low Volume", filter_stats
 
-    # 12) RSI بين 55 و 75
     if not (RSI_MIN <= rsi <= RSI_MAX):
-        return None, f"RSI خارج النطاق ({rsi:.1f})"
+        return None, "RSI Out of Range", filter_stats
 
-    # 13) ADX بين 20 و 50
     if not (ADX_MIN <= adx <= ADX_MAX):
-        return None, f"ADX خارج النطاق ({adx:.1f})"
+        return None, "ADX Out of Range", filter_stats
 
     return {
         "bar_time": df.index[-1],
@@ -295,7 +319,7 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
         "highest_of_last_10": float(highest_of_last_10),
         "dollar_volume": float(dollar_volume),
         "distance_ema9": float(distance_from_ema9 * 100)
-    }, None
+    }, None, filter_stats
 
 # =============================================================================
 # Telegram Alerts
@@ -335,7 +359,7 @@ def safe_run_async(coro):
     try:
         asyncio.run(coro)
     except Exception as e:
-        logging.error(f"خطأ تنفيذ التنفيذ اللاتزامني: {e}")
+        logging.error(f"Async error: {e}")
 
 def send_alert(symbol: str, signal: dict) -> None:
     safe_run_async(send_alert_async(symbol, signal))
@@ -351,13 +375,13 @@ def send_startup_message(watchlist_size, timeframe):
         text = (
             f"🤖 Sniper Bot شغال بنجاح!\n"
             f"يراقب {watchlist_size} سهم على الفريم {timeframe}m.\n"
-            f"13 شرط صارم مفعلة مع التقرير التشخيصي ✅"
+            f"جاهز لإرسال الإشارات ✅"
         )
         await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
     try:
         safe_run_async(_send())
     except Exception as exc:
-        logging.error(f"فشل إرسال رسالة البداية: {exc}")
+        logging.error(f"Startup message failed: {exc}")
 
 def send_heartbeat() -> None:
     async def _send():
@@ -368,7 +392,7 @@ def send_heartbeat() -> None:
     try:
         safe_run_async(_send())
     except Exception as exc:
-        logging.error(f"فشل إرسال نبض الحياة: {exc}")
+        logging.error(f"Heartbeat failed: {exc}")
 
 def send_error_message(text: str) -> None:
     async def _send():
@@ -420,11 +444,10 @@ def start_health_server() -> None:
     thread.start()
 
 # =============================================================================
-# Main Scan Loop with Deep Reporting
+# Market Hours & Scan Loop
 # =============================================================================
 
 def is_market_open() -> bool:
-    """فحص ما إذا كان السوق الأمريكي مفتوحاً (بتوقيت UTC)"""
     now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         return False
@@ -440,31 +463,41 @@ def check_credentials_soft() -> bool:
         ] if not value
     ]
     if missing:
-        logging.error(f"متغيرات البيئة التالية مفقودة: {', '.join(missing)}")
+        logging.error(f"Missing ENVs: {', '.join(missing)}")
         return False
     return True
 
 def scan_once(state: dict) -> None:
     t_total_start = time.monotonic()
-    logging.info(f"🔄 بدء الفحص الجماعي لـ {len(TICKERS)} سهماً...")
 
-    # 1) مرحلة التحميل الجماعي
+    # 1) التحميل الجماعي
     t_download_start = time.monotonic()
     all_dfs, missing_tickers = fetch_all_bars_bulk(TICKERS)
-    t_download_end = time.monotonic()
-    download_time = t_download_end - t_download_start
+    download_time = time.monotonic() - t_download_start
 
-    # 2) مرحلة التحليل والفلترة
+    # 2) التحليل والفلترة
     t_analysis_start = time.monotonic()
     signals_count = 0
     rejected_count = 0
     reasons_counter = Counter()
 
+    filter_pass_counts = {
+        "EMA Trend": 0,
+        "VWAP": 0,
+        "RSI": 0,
+        "ADX": 0,
+        "Volume": 0,
+        "Breakout": 0
+    }
+
+    scanned_count = len(TICKERS)
+
     for symbol in TICKERS:
         if symbol in missing_tickers or symbol not in all_dfs:
-            reasons_counter["بيانات غير متوفرة من Yahoo"] += 1
+            reasons_counter["Missing Data"] += 1
             rejected_count += 1
-            logging.info(f"  ❌ {symbol:<5} | بيانات غير متوفرة")
+            if DEBUG:
+                logging.info(f"{symbol}\n0 bars\n❌ Missing Data\n")
             continue
 
         df = all_dfs[symbol]
@@ -472,60 +505,67 @@ def scan_once(state: dict) -> None:
 
         bar_time_iso = df.index[-1].isoformat()
         if already_alerted(state, symbol, bar_time_iso):
-            reasons_counter["تنبيه سابق لنفس الشمعة"] += 1
+            reasons_counter["Already Alerted"] += 1
             rejected_count += 1
-            logging.info(f"  ❌ {symbol:<5} | {bars_count} bars | تم التنبيه عنه سابقاً")
+            if DEBUG:
+                logging.info(f"{symbol}\n{bars_count} bars\n❌ Already Alerted\n")
             continue
 
-        signal, reject_reason = evaluate_signal(df)
+        signal, reject_reason, f_stats = evaluate_signal(df)
+
+        # تجميع إحصائيات الفلاتر
+        for key, val in f_stats.items():
+            if val:
+                filter_pass_counts[key] += 1
+
         if signal is None:
             reasons_counter[reject_reason] += 1
             rejected_count += 1
-            logging.info(f"  ❌ {symbol:<5} | {bars_count} bars | {reject_reason}")
+            if DEBUG:
+                logging.info(f"{symbol}\n{bars_count} bars\n❌ {reject_reason}\n")
             continue
 
-        logging.info(f"  ✅ {symbol:<5} | {bars_count} bars | PASS (${signal['close']:.2f})")
+        if DEBUG:
+            logging.info(f"{symbol}\n{bars_count} bars\n✅ PASS\n")
+
         send_alert(symbol, signal)
         mark_alerted(state, symbol, bar_time_iso)
         save_alerted_bars(state)
         signals_count += 1
 
-    t_analysis_end = time.monotonic()
-    analysis_time = t_analysis_end - t_analysis_start
+    analysis_time = time.monotonic() - t_analysis_start
     total_time = time.monotonic() - t_total_start
 
-    # 3) طباعة التقرير الشامل والمفصل
-    summary = []
-    summary.append("\n==========================================")
-    summary.append(f"📊 Scan Summary ({len(TICKERS)} Symbols)")
-    summary.append("==========================================")
-    summary.append(f"🟢 Signals Found : {signals_count}")
-    summary.append(f"🔴 Rejected      : {rejected_count}")
-    if missing_tickers:
-        summary.append(f"⚠️ Missing Data  : {len(missing_tickers)} -> ({', '.join(missing_tickers)})")
-    
-    summary.append("\n⏱️ Timing Breakdown:")
-    summary.append(f"  • Download Data : {download_time:.2f}s")
-    summary.append(f"  • Analysis Time : {analysis_time:.2f}s")
-    summary.append(f"  • Total Time    : {total_time:.2f}s")
+    # 3) طباعة التقرير بالصيغة المطلوبة تماماً
+    report = []
+    report.append("\n========== Scan Summary ==========")
+    report.append(f"Scanned  : {scanned_count}")
+    report.append(f"Signals  : {signals_count}")
+    report.append(f"Rejected : {rejected_count}\n")
 
-    summary.append("\n📋 Rejection Reasons Breakdown:")
-    for reason, count in reasons_counter.most_common():
-        summary.append(f"  • {reason:<32} {count}")
-    summary.append("==========================================\n")
+    report.append("Top Reject Reasons\n")
+    for idx, (reason, count) in enumerate(reasons_counter.most_common(), start=1):
+        pct = (count / scanned_count) * 100 if scanned_count > 0 else 0
+        report.append(f"{idx}- {reason:<22} : {count:<2} ({pct:.0f}%)")
 
-    logging.info("\n".join(summary))
+    report.append("\n============================\n")
+    report.append("Filter Statistics\n")
+    for f_name in ["EMA Trend", "VWAP", "RSI", "ADX", "Volume", "Breakout"]:
+        report.append(f"{f_name:<16} : {filter_pass_counts[f_name]} PASS")
+
+    report.append("\n============================\n")
+    report.append(f"Download : {download_time:.2f}s")
+    report.append(f"Analysis : {analysis_time:.2f}s")
+    report.append(f"Total    : {total_time:.2f}s\n")
+
+    logging.info("\n".join(report))
 
 def main() -> None:
     start_health_server()
-    logging.info("🌐 تم تشغيل خادم الصحة (Health Check Server) بنجاح.")
-
     if not check_credentials_soft():
-        logging.warning("⚠️ يرجى إضافة المتغيرات المفقودة في Railway للبدء بالفحص.")
         while True:
             time.sleep(3600)
 
-    logging.info(f"🚀 Sniper Bot يراقب {len(TICKERS)} سهم على فريم {TIMEFRAME_MINUTES} دقيقة...")
     send_startup_message(len(TICKERS), TIMEFRAME_MINUTES)
 
     state = load_alerted_bars()
@@ -542,10 +582,8 @@ def main() -> None:
             current_time = datetime.now(timezone.utc)
             current_minute = current_time.minute
 
-            # الفحص عند إغلاق شمعة الـ 15 دقيقة (00, 15, 30, 45)
             if current_minute % 15 == 0 and current_minute != last_scan_minute:
                 if is_market_open():
-                    logging.info(f"⏰ [وقت إغلاق الشمعة {current_minute}m]: بدء الفحص الفعلي...")
                     scan_once(state)
                 else:
                     logging.info(f"💤 [الدقيقة {current_minute}]: السوق مغلق حالياً...")
@@ -555,7 +593,7 @@ def main() -> None:
             time.sleep(10)
 
         except Exception as exc:
-            logging.exception(f"خطأ في الحلقة الرئيسية: {exc}")
+            logging.exception(f"Main loop error: {exc}")
             send_error_message(str(exc))
             time.sleep(POLL_SECONDS)
 
