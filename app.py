@@ -27,9 +27,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # =============================================================================
 
 # جلب بيانات التليجرام مباشرة من المتغيرات البيئية في ريل واي
-TELEGRAM_BOT_TOKEN = os.environ.get("8969575845:AAEBSIB_umYNBCWYARzLCJArYjR9YozTye4
-", "")
-TELEGRAM_CHAT_ID = os.environ.get("176695850", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # قائمة الأسهم الخاصة بك كاملة ومحمية من التكرار
 _raw_tickers = [
