@@ -72,6 +72,15 @@ PORT = int(os.environ.get("PORT", 8080))
 telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
 # =============================================================================
+# Flask Server Setup (إصلاح مكان الدالة لمنع الـ Syntax Error)
+# =============================================================================
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return {"status": "healthy", "bot": "Sniper Scanner Running with Yahoo Finance Data"}, 200
+
+# =============================================================================
 # Yahoo Finance Bulk Data Access
 # =============================================================================
 
@@ -155,14 +164,14 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if candle_range == 0: 
         return None, "شمعة بلا مدى سعري"
     if (close - open_price) <= candle_range * 0.5: 
-        return None, "❌ الشمعة ليست قوية (أقل من 50% من المدى)"
+        return None, "❌ الشمعة ليست قوية"
 
     # --- 2) فلتر الشمعة العملاقة ---
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE: 
         return None, f"❌ شمعة متفجرة بشكل مفرط وعملاقة ({candle_size_pct*100:.1f}%)"
 
-    # --- 3) فلتر الشمعتين الاستنزافيتين (إصلاح الجزء المقطوع وتأمين المنطق) ---
+    # --- 3) فلتر الشمعتين الاستنزافيتين ---
     if len(df) >= 2:
         last_2 = df.iloc[-2:]
         c1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
@@ -174,20 +183,20 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
             c2_body_pct = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / c2_range
             
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
-                return None, "❌ تتابع صعود عمودي استنزافي حاد (خطر الانعكاس)"
+                return None, "❌ تتابع صعود عمودي استنزافي حاد"
 
     # --- 4) فلاتر الزخم والاتجاه المؤسساتي ---
     if not (RSI_MIN <= rsi <= RSI_MAX): 
         return None, f"❌ RSI خارج النطاق المطلوب ({rsi:.1f})"
         
     if not (ema_fast > ema_mid > ema_slow > ema_long): 
-        return None, "❌ المتوسطات الفنية ليست مرتبة تصاعدياً (9 > 20 > 50 > 200)"
+        return None, "❌ المتوسطات الفنية ليست مرتبة تصاعدياً"
         
     if close < vwap: 
         return None, "❌ السعر يتداول تحت خط الـ VWAP"
         
     if volume < (avg_volume * VOLUME_MULTIPLIER): 
-        return None, f"❌ حجم السيولة الحالي أقل من المتوسط المطلق للسهم"
+        return None, f"❌ حجم السيولة الحالي أقل من المتوسط المطلق"
         
     if not (ADX_MIN <= adx <= ADX_MAX): 
         return None, f"❌ مؤشر قوة الاتجاه ADX غير مثالي ({adx:.1f})"
@@ -195,12 +204,12 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     # فلتر السيولة النقدية بالشمعة بالدولار
     dollar_volume = volume * close
     if dollar_volume < MIN_DOLLAR_VOLUME: 
-        return None, f"❌ سيولة الشمعة النقدية ضعيفة ({dollar_volume:,.0f}$)"
+        return None, f"❌ سيولة الشمعة النقدية ضعيفة"
         
-    # فلتر الابتعاد عن متوسط الـ 9 أيام لضمان جودة نقطة الدخول
+    # فلتر الابتعاد عن متوسط الـ 9 أيام
     ema_dist = (close - ema_fast) / ema_fast
     if ema_dist > MAX_EMA9_DISTANCE: 
-        return None, f"❌ السعر ممتد ومبتعد جداً عن خط الـ EMA9 ({ema_dist*100:.2f}%)"
+        return None, f"❌ السعر ممتد ومبتعد جداً عن خط الـ EMA9"
 
     # نجاح الإشارة وتخطي كافة الفلاتر بنجاح
     return {
@@ -216,9 +225,8 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
 # =============================================================================
 
 def send_telegram_alert(symbol: str, metrics: dict):
-    """ صياغة وإرسال رسالة التنبيه الفورية بشكل احترافي ومنسق على هاتفك """
     if not telegram_bot or not TELEGRAM_CHAT_ID:
-        logging.warning("⚠️ إعدادات التليجرام غير مكتملة في الـ Environment Variables")
+        logging.warning("⚠️ إعدادات التليجرام غير مكتملة في الـ Variables")
         return
 
     message = (
@@ -232,19 +240,13 @@ def send_telegram_alert(symbol: str, metrics: dict):
         f"🚀 *ينطبق عليها بالكامل شروط عبد العزيز الصارمة للاختراقات.*"
     )
     try:
-        telegram_bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=message,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        logging.info(f"🚀 تم إرسال تنبيه السهم {symbol} بنجاح إلى تليجرام.")
+        telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        logging.info(f"🚀 تم إرسال تنبيه السهم {symbol} بنجاح.")
     except Exception as e:
         logging.error(f"❌ فشل إرسال التنبيه إلى تليجرام لـ {symbol}: {e}")
 
-# =============================================================================
-# Main Scanner Engine & Flask Server
-# =============================================================================
-
-app = Flask(__name__)
-
-@app.route('/')
+def verify_telegram_connection():
+    """ دالة فحص وتأكيد عند بداية تشغيل السيرفر للتأكد من وصول رسائل التليجرام """
+    if telegram_bot and TELEGRAM_CHAT_ID:
+        try:
+            telegram_bot.send_message(
