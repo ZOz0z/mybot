@@ -1,4 +1,4 @@
-alpaca-py>=0.43.5
+yfinance
 flask>=3.1.3
 numpy>=2.2.6
 pandas>=2.3.3
