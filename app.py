@@ -72,7 +72,7 @@ PORT = int(os.environ.get("PORT", 8080))
 telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
 # =============================================================================
-# Flask Server Setup (إصلاح مكان الدالة لمنع الـ Syntax Error)
+# Flask Server Setup
 # =============================================================================
 app = Flask(__name__)
 
@@ -171,16 +171,20 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None]:
     if candle_size_pct > MAX_CANDLE_RANGE: 
         return None, f"❌ شمعة متفجرة بشكل مفرط وعملاقة ({candle_size_pct*100:.1f}%)"
 
-    # --- 3) فلتر الشمعتين الاستنزافيتين ---
+    # --- 3) فلتر الشمعتين الاستنزافيتين (تم إصلاح أقواس الـ iloc هنا) ---
     if len(df) >= 2:
-        last_2 = df.iloc[-2:]
-        c1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
-        c2_range = last_2["high"].iloc[1] - last_2["low"].iloc[1]
+        c1_row = df.iloc[-2]
+        c2_row = df.iloc[-1]
+        
+        c1_range = c1_row["high"] - c1_row["low"]
+        c2_range = c2_row["high"] - c2_row["low"]
+        
         if c1_range > 0 and c2_range > 0:
-            c1_bullish = last_2["close"].iloc[0] > last_2["open"].iloc[0]
-            c2_bullish = last_2["close"].iloc[1] > last_2["open"].iloc[1]
-            c1_body_pct = (last_2["close"].iloc[0] - last_2["open"].iloc[0]) / c1_range
-            c2_body_pct = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / c2_range
+            c1_bullish = c1_row["close"] > c1_row["open"]
+            c2_bullish = c2_row["close"] > c2_row["open"]
+            
+            c1_body_pct = (c1_row["close"] - c1_row["open"]) / c1_range
+            c2_body_pct = (c2_row["close"] - c2_row["open"]) / c2_range
             
             if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
                 return None, "❌ تتابع صعود عمودي استنزافي حاد"
@@ -250,3 +254,4 @@ def verify_telegram_connection():
     if telegram_bot and TELEGRAM_CHAT_ID:
         try:
             telegram_bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID, 
