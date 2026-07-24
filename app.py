@@ -93,13 +93,19 @@ MAX_CANDLE_RANGE = 0.15           # تجنّب أيام الجنون (>15%)
 MAX_EXTENSION = 0.12              # لا يبعد أكثر من 12% عن EMA20
 MAX_DAILY_RETURN = 0.10           # لا يكون قافز أكثر من 10% اليوم
 
+# ---- فلتر الأرباح ----
+EARNINGS_BLACKOUT_DAYS = 7    # تجاهل السهم إذا كانت أرباحه خلال هذا العدد من الأيام
+EARNINGS_CACHE_HOURS = 24     # تحديث تواريخ الأرباح مرة كل 24 ساعة
+
 # ---- إدارة المخاطر ----
 ATR_STOP_MULT = 2.0
 RISK_REWARD = 2.0
 MAX_LOSS_PCT = 0.08               # وقف الخسارة لا يتجاوز 8%
 
 # ---- توقيت الفحص ----
-SCAN_HOUR_UTC = 21                # 21:00 UTC = بعد إغلاق السوق بساعة
+# 22:00 UTC = الساعة 1:00 بعد منتصف الليل بتوقيت السعودية، طوال السنة.
+# آمن في التوقيتين: بعد الإغلاق بساعتين صيفاً وبساعة شتاءً.
+SCAN_HOUR_UTC = 22
 SCAN_MINUTE_UTC = 0
 
 HEARTBEAT_SECONDS = 43200         # كل 12 ساعة
@@ -163,6 +169,62 @@ def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], li
     except Exception as e:
         logging.error(f"خطأ في التحميل الجماعي: {e}")
         return {}, tickers_list
+
+
+_earnings_cache: dict[str, object] = {}
+_earnings_cache_time: float = 0.0
+
+
+def get_next_earnings_date(symbol: str):
+    """
+    يُرجع تاريخ أقرب إعلان أرباح قادم، أو None إن لم يتوفر.
+    النتائج تُخزّن في الذاكرة 24 ساعة لتقليل الطلبات على ياهو.
+    """
+    global _earnings_cache, _earnings_cache_time
+
+    if time.time() - _earnings_cache_time > EARNINGS_CACHE_HOURS * 3600:
+        _earnings_cache = {}
+        _earnings_cache_time = time.time()
+
+    if symbol in _earnings_cache:
+        return _earnings_cache[symbol]
+
+    result = None
+    try:
+        cal = yf.Ticker(symbol).calendar
+        dates = None
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date")
+        elif isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+            dates = cal.loc["Earnings Date"].tolist()
+
+        if dates:
+            if not isinstance(dates, (list, tuple)):
+                dates = [dates]
+            parsed = []
+            for d in dates:
+                try:
+                    parsed.append(pd.Timestamp(d).date())
+                except Exception:
+                    continue
+            today = datetime.now(timezone.utc).date()
+            upcoming = sorted([d for d in parsed if d >= today])
+            if upcoming:
+                result = upcoming[0]
+    except Exception:
+        result = None
+
+    _earnings_cache[symbol] = result
+    return result
+
+
+def has_earnings_soon(symbol: str) -> tuple[bool, object]:
+    """True إذا كانت الأرباح خلال نافذة الحظر."""
+    d = get_next_earnings_date(symbol)
+    if d is None:
+        return False, None
+    days = (d - datetime.now(timezone.utc).date()).days
+    return (0 <= days <= EARNINGS_BLACKOUT_DAYS), d
 
 
 def benchmark_5d_return(all_dfs: dict) -> float | None:
@@ -334,6 +396,9 @@ def format_signal_message(symbol: str, s: dict) -> str:
     else:
         rel = f"⚠️ أضعف من السوق بـ {s['rel_strength']:.1f}% خلال 5 أيام\n"
 
+    ed = s.get("earnings_date")
+    earn = f"🗓 الأرباح القادمة: {ed} (بعيدة ✅)\n\n" if ed else "🗓 لا يوجد تاريخ أرباح قريب معروف\n\n"
+
     return (
         f"🎯 صيدة يومية — {symbol}\n"
         f"شمعة {date_str}\n\n"
@@ -345,6 +410,7 @@ def format_signal_message(symbol: str, s: dict) -> str:
         f"{rel}"
         f"📊 RVOL: {s['rvol']:.2f}x   |   سيولة: ${s['dollar_volume']:,.0f}\n"
         f"⚡ RSI: {s['rsi']:.0f}   |   🔥 ADX: {s['adx']:.0f}\n\n"
+        f"{earn}"
         f"📋 الخطة: ادخل بأمر شراء عند الفتح، وضع وقف الخسارة فوراً.\n"
         f"⚠️ لا تخاطر بأكثر من 25% من رأس مالك في صفقة واحدة."
     )
@@ -437,6 +503,16 @@ def scan_once(state: dict):
             if DEBUG:
                 logging.info(f"{symbol} ❌ {reason}")
             continue
+
+        # فلتر الأرباح — يُفحص أخيراً لأنه يتطلب طلباً إضافياً لياهو
+        soon, edate = has_earnings_soon(symbol)
+        if soon:
+            reasons[f"Earnings Soon"] += 1
+            rejected += 1
+            logging.info(f"{symbol} ⛔ تم تجاهله — أرباح بتاريخ {edate}")
+            continue
+
+        signal["earnings_date"] = edate
 
         logging.info(f"✅ SIGNAL {symbol} @ ${signal['close']:.2f} | SL ${signal['stop_loss']:.2f} | TP ${signal['take_profit']:.2f}")
         send_alert(symbol, signal)
