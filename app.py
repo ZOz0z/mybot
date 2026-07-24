@@ -1,7 +1,11 @@
 """
 Sniper Bot — 30-minute long-setup scanner with Telegram alerts.
-Customized output report, Filter Statistics, and DEBUG mode control.
-Engineered for Railway / Cloud deployment.
+
+إصلاحات هذه النسخة:
+  1. ✅ استبعاد الشمعة غير المكتملة (الباق الذي كان يمنع كل الإشارات)
+  2. ✅ اللوق على stdout بدل stderr (يمنع اللون الأحمر في Railway)
+  3. ✅ إضافة القوة النسبية مقابل QQQ (بدون طلب إضافي لياهو)
+  4. ✅ حساب وقف الخسارة والهدف تلقائياً بناءً على ATR
 """
 
 import asyncio
@@ -9,6 +13,7 @@ from collections import Counter
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -30,7 +35,12 @@ DEBUG = False
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+# ✅ إصلاح 2: توجيه اللوق إلى stdout بدل stderr
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    stream=sys.stdout,
+)
 
 _raw_tickers = [
     "RIVN", "NIO", "PLUG", "SOUN", "XPEV", "RIOT", "AMD", "INTC", "OPEN", "PATH",
@@ -45,12 +55,12 @@ _raw_tickers = [
 
 TICKERS = sorted(list(set(_raw_tickers)))
 
-# ✅ تعديل 1: تغيير التايم فريم من 15 إلى 30 دقيقة
+# مؤشر السوق العام — يُحمّل ضمن نفس الطلب، بدون طلب إضافي لياهو
+BENCHMARK = "QQQ"
+
 TIMEFRAME_MINUTES = 30
 
-# ✅ تعديل 2: تخفيف شرط الشمعة من 50% إلى 40% عشان يمر أسهم أكثر
 CANDLE_BODY_MIN = 0.4
-
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
@@ -66,11 +76,16 @@ ADX_MIN = 20
 ADX_MAX = 50
 
 MIN_DOLLAR_VOLUME = 1500000.0
-MAX_EMA9_DISTANCE = 0.02
+MAX_EMA9_DISTANCE = 0.04
 MAX_CANDLE_RANGE = 0.06
 MIN_ATR_PCT = 0.006
-DISTANCE_FROM_HIGH = 0.985
+DISTANCE_FROM_HIGH = 0.97
 MAX_DAILY_RETURN = 0.08
+
+# ✅ إصلاح 4: إدارة المخاطر
+ATR_STOP_MULT = 1.5      # وقف الخسارة = السعر - 1.5 × ATR
+RISK_REWARD = 2.0        # الهدف = ضعف المخاطرة
+MAX_LOSS_PCT = 0.02      # لا تسمح بوقف خسارة أبعد من 2%
 
 POLL_SECONDS = 60
 HEARTBEAT_SECONDS = 14400
@@ -82,9 +97,14 @@ PORT = int(os.environ.get("PORT", 8080))
 # =============================================================================
 
 def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """
+    تحميل جماعي بطلب واحد. يستبعد الشمعة الأخيرة غير المكتملة.
+    """
     try:
-        tickers_str = " ".join(tickers_list)
-        # ✅ تعديل 3: تغيير interval من 15m إلى 30m
+        # نضيف مؤشر السوق داخل نفس الطلب — لا طلب إضافي
+        download_list = list(dict.fromkeys(tickers_list + [BENCHMARK]))
+        tickers_str = " ".join(download_list)
+
         data = yf.download(
             tickers=tickers_str,
             period="1mo",
@@ -100,31 +120,43 @@ def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], li
         if data.empty:
             return {}, tickers_list
 
+        req_cols = ["open", "high", "low", "close", "volume"]
+
+        def _clean(df_in: pd.DataFrame) -> pd.DataFrame | None:
+            df_t = df_in.copy()
+            df_t.dropna(subset=["Close"], inplace=True)
+            if df_t.empty:
+                return None
+            df_t.columns = [str(c).lower() for c in df_t.columns]
+            if not all(c in df_t.columns for c in req_cols):
+                return None
+            df_t = df_t[req_cols].sort_index()
+
+            # ✅ إصلاح 1: استبعاد الشمعة الأخيرة (غير مكتملة)
+            if len(df_t) > 1:
+                df_t = df_t.iloc[:-1]
+
+            if len(df_t) < 5:
+                return None
+            return df_t
+
         if isinstance(data.columns, pd.MultiIndex):
-            for ticker in tickers_list:
-                if ticker in data.columns.levels[0]:
-                    df_ticker = data[ticker].copy()
-                    df_ticker.dropna(subset=["Close"], inplace=True)
-                    if not df_ticker.empty and len(df_ticker) >= 5:
-                        df_ticker.columns = [str(col).lower() for col in df_ticker.columns]
-                        req_cols = ["open", "high", "low", "close", "volume"]
-                        if all(col in df_ticker.columns for col in req_cols):
-                            all_dfs[ticker] = df_ticker[req_cols].sort_index()
-                        else:
-                            missing_tickers.append(ticker)
-                    else:
+            available = set(data.columns.levels[0])
+            for ticker in download_list:
+                if ticker in available:
+                    cleaned = _clean(data[ticker])
+                    if cleaned is not None:
+                        all_dfs[ticker] = cleaned
+                    elif ticker != BENCHMARK:
                         missing_tickers.append(ticker)
-                else:
+                elif ticker != BENCHMARK:
                     missing_tickers.append(ticker)
         else:
-            df_single = data.copy()
-            df_single.dropna(subset=["Close"], inplace=True)
-            df_single.columns = [str(col).lower() for col in df_single.columns]
-            req_cols = ["open", "high", "low", "close", "volume"]
-            if all(col in df_single.columns for col in req_cols):
-                all_dfs[tickers_list[0]] = df_single[req_cols].sort_index()
+            cleaned = _clean(data)
+            if cleaned is not None:
+                all_dfs[download_list[0]] = cleaned
             else:
-                missing_tickers.append(tickers_list[0])
+                missing_tickers.append(download_list[0])
 
         return all_dfs, missing_tickers
 
@@ -132,8 +164,25 @@ def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], li
         logging.error(f"خطأ أثناء التحميل الجماعي: {e}")
         return {}, tickers_list
 
+
+def compute_benchmark_return(all_dfs: dict) -> float | None:
+    """أداء مؤشر السوق اليوم بالنسبة المئوية."""
+    df = all_dfs.get(BENCHMARK)
+    if df is None or df.empty:
+        return None
+    try:
+        day = df.index[-1].date()
+        day_bars = df[df.index.date == day]
+        if day_bars.empty:
+            return None
+        open_p = day_bars["open"].iloc[0]
+        close_p = day_bars["close"].iloc[-1]
+        return float((close_p - open_p) / open_p * 100)
+    except Exception:
+        return None
+
 # =============================================================================
-# Indicators & Signal Evaluation
+# Indicators
 # =============================================================================
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -153,6 +202,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["adx"] = 0
     return df
 
+
 def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
     pv = typical_price * df["volume"]
@@ -161,36 +211,30 @@ def _daily_vwap(df: pd.DataFrame) -> pd.Series:
     cum_vol = df["volume"].groupby(day_key).cumsum()
     return cum_pv / cum_vol.replace(0, pd.NA)
 
-def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
+# =============================================================================
+# Signal evaluation
+# =============================================================================
+
+def evaluate_signal(df: pd.DataFrame, bench_return: float | None = None) -> tuple[dict | None, str | None, dict]:
     df = compute_indicators(df)
-    needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}", f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
+    needed_cols = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}",
+                   f"ema{EMA_LONG}", "rsi", "vwap", "avg_volume", "adx", "atr"]
+
+    filter_stats = {
+        "EMA Trend": False, "VWAP": False, "RSI": False,
+        "ADX": False, "Volume": False, "Breakout": False
+    }
 
     last_row = df[needed_cols].iloc[-1]
     missing = last_row[last_row.isna()]
-
-    filter_stats = {
-        "EMA Trend": False,
-        "VWAP": False,
-        "RSI": False,
-        "ADX": False,
-        "Volume": False,
-        "Breakout": False
-    }
-
     if not missing.empty:
         return None, "Missing Indicators", filter_stats
 
     last = df.iloc[-1]
-    close = last["close"]
-    open_price = last["open"]
-    high = last["high"]
-    low = last["low"]
-    volume = last["volume"]
-    avg_volume = last["avg_volume"]
-    rsi = last["rsi"]
-    vwap = last["vwap"]
-    adx = last["adx"]
-    atr = last["atr"]
+    close, open_price = last["close"], last["open"]
+    high, low = last["high"], last["low"]
+    volume, avg_volume = last["volume"], last["avg_volume"]
+    rsi, vwap, adx, atr = last["rsi"], last["vwap"], last["adx"], last["atr"]
 
     ema_fast = last[f"ema{EMA_FAST}"]
     ema_mid = last[f"ema{EMA_MID}"]
@@ -201,6 +245,9 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
     highest_of_last_10 = previous_10_bars["high"].max() if not previous_10_bars.empty else high
     target_breakout_price = highest_of_last_10 * 1.002
 
+    dollar_volume = close * volume
+    rvol = volume / avg_volume if avg_volume > 0 else 0
+
     # إحصائيات الفلاتر
     if (ema_slow > ema_long) and (ema_fast > ema_mid > ema_slow) and (close > ema_fast):
         filter_stats["EMA Trend"] = True
@@ -210,22 +257,18 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
         filter_stats["RSI"] = True
     if ADX_MIN <= adx <= ADX_MAX:
         filter_stats["ADX"] = True
-    dollar_volume = close * volume
-    rvol = volume / avg_volume if avg_volume > 0 else 0
     if (rvol > VOLUME_MULTIPLIER) and (volume > avg_volume) and (dollar_volume >= MIN_DOLLAR_VOLUME):
         filter_stats["Volume"] = True
     if close > target_breakout_price:
         filter_stats["Breakout"] = True
 
-    # شروط الرفض
+    # ---------------- شروط الرفض ----------------
     candle_range = high - low
     if candle_range == 0:
         return None, "No Range Candle", filter_stats
 
-    # ✅ تعديل 4: شرط الشمعة 40% بدل 50%
-    strong_candle = (close - open_price) > candle_range * CANDLE_BODY_MIN
-    if not strong_candle:
-        return None, "Candle <40%", filter_stats
+    if close <= open_price:
+        return None, "Bearish Candle", filter_stats
 
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE:
@@ -233,14 +276,14 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
 
     if len(df) >= 2:
         last_2 = df.iloc[-2:]
-        candle_1_range = last_2["high"].iloc[0] - last_2["low"].iloc[0]
-        candle_2_range = last_2["high"].iloc[1] - last_2["low"].iloc[1]
-        if candle_1_range > 0 and candle_2_range > 0:
-            c1_bullish = last_2["close"].iloc[0] > last_2["open"].iloc[0]
-            c2_bullish = last_2["close"].iloc[1] > last_2["open"].iloc[1]
-            c1_body_pct = (last_2["close"].iloc[0] - last_2["open"].iloc[0]) / candle_1_range
-            c2_body_pct = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / candle_2_range
-            if c1_bullish and c2_bullish and c1_body_pct > 0.8 and c2_body_pct > 0.8:
+        r1 = last_2["high"].iloc[0] - last_2["low"].iloc[0]
+        r2 = last_2["high"].iloc[1] - last_2["low"].iloc[1]
+        if r1 > 0 and r2 > 0:
+            c1_bull = last_2["close"].iloc[0] > last_2["open"].iloc[0]
+            c2_bull = last_2["close"].iloc[1] > last_2["open"].iloc[1]
+            b1 = (last_2["close"].iloc[0] - last_2["open"].iloc[0]) / r1
+            b2 = (last_2["close"].iloc[1] - last_2["open"].iloc[1]) / r2
+            if c1_bull and c2_bull and b1 > 0.8 and b2 > 0.8:
                 return None, "Exhaustion Candles", filter_stats
 
     if len(df) < 12:
@@ -272,45 +315,56 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
 
     if not (ema_slow > ema_long):
         return None, "EMA50 < EMA200", filter_stats
-
     if not (ema_fast > ema_mid > ema_slow):
         return None, "EMA Order Wrong", filter_stats
-
     if not (close > ema_fast):
         return None, "Below EMA9", filter_stats
-
     if not (close > vwap):
         return None, "Below VWAP", filter_stats
 
     distance_from_ema9 = (close - ema_fast) / ema_fast
     if distance_from_ema9 > MAX_EMA9_DISTANCE:
-        return None, "Far From EMA9 (>2%)", filter_stats
+        return None, "Far From EMA9 (>4%)", filter_stats
 
     if not (rvol > VOLUME_MULTIPLIER and volume > avg_volume):
         return None, "Low Volume", filter_stats
-
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return None, "RSI Out of Range", filter_stats
-
     if not (ADX_MIN <= adx <= ADX_MAX):
         return None, "ADX Out of Range", filter_stats
+
+    # ✅ إصلاح 4: حساب وقف الخسارة والهدف
+    stop_loss = close - (ATR_STOP_MULT * atr)
+    max_allowed_stop = close * (1 - MAX_LOSS_PCT)
+    stop_loss = max(stop_loss, max_allowed_stop)   # لا نسمح بخسارة أكبر من 2%
+    risk = close - stop_loss
+    take_profit = close + (risk * RISK_REWARD)
+
+    # ✅ إصلاح 3: القوة النسبية مقابل السوق
+    daily_return_pct = daily_return * 100
+    if bench_return is None:
+        rel_strength = None
+    else:
+        rel_strength = daily_return_pct - bench_return
 
     return {
         "bar_time": df.index[-1],
         "close": float(close),
-        "ema_fast": float(ema_fast),
-        "ema_mid": float(ema_mid),
-        "ema_slow": float(ema_slow),
-        "ema_long": float(ema_long),
         "vwap": float(vwap),
         "volume": float(volume),
         "avg_volume": float(avg_volume),
         "rsi": float(rsi),
         "adx": float(adx),
-        "daily_return": float(daily_return * 100),
+        "atr": float(atr),
+        "daily_return": float(daily_return_pct),
+        "bench_return": bench_return,
+        "rel_strength": rel_strength,
         "highest_of_last_10": float(highest_of_last_10),
         "dollar_volume": float(dollar_volume),
-        "distance_ema9": float(distance_from_ema9 * 100)
+        "distance_ema9": float(distance_from_ema9 * 100),
+        "stop_loss": float(stop_loss),
+        "take_profit": float(take_profit),
+        "risk_pct": float(risk / close * 100),
     }, None, filter_stats
 
 # =============================================================================
@@ -325,26 +379,33 @@ def _get_bot() -> Bot:
         _bot = Bot(token=TELEGRAM_BOT_TOKEN)
     return _bot
 
-def format_signal_message(symbol: str, signal: dict) -> str:
-    bar_time = signal["bar_time"]
-    bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M UTC") if isinstance(bar_time, datetime) else str(bar_time)
+
+def format_signal_message(symbol: str, s: dict) -> str:
+    bar_time = s["bar_time"]
+    bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M") if isinstance(bar_time, datetime) else str(bar_time)
+
+    if s["rel_strength"] is None:
+        rel_line = "📊 القوة النسبية: غير متاحة\n"
+    elif s["rel_strength"] > 0:
+        rel_line = f"💪 أقوى من السوق بـ {s['rel_strength']:+.2f}% (QQQ {s['bench_return']:+.2f}%)\n"
+    else:
+        rel_line = f"⚠️ أضعف من السوق بـ {s['rel_strength']:.2f}% (QQQ {s['bench_return']:+.2f}%)\n"
+
     return (
-        f"🎯 SNIPER BREAKOUT — {symbol}\n"
-        f"سهم: {symbol}\n"
+        f"🎯 صيدة — {symbol}\n"
         f"الوقت: {bar_time_str}\n\n"
-        f"💵 سعر الدخول: ${signal['close']:.2f}\n"
-        f"🚀 صعود اليوم: +{signal['daily_return']:.2f}%\n"
-        f"📈 الترند: EMA9 > EMA20 > EMA50 ✅\n"
-        f"🛡 طويل الأجل: EMA50 > EMA200 ✅\n"
-        f"📍 VWAP: ${signal['vwap']:.2f} ✅\n"
-        f"📏 بُعد EMA9: {signal['distance_ema9']:.2f}%\n"
-        f"📊 RVOL: {signal['volume'] / signal['avg_volume']:.2f}x\n"
-        f"💰 Dollar Volume: ${signal['dollar_volume']:,.0f}\n"
-        f"⚡ RSI: {signal['rsi']:.1f}\n"
-        f"🔥 ADX: {signal['adx']:.1f}\n"
-        f"🔳 اختراق 10 شمعات: فوق ${signal['highest_of_last_10']:.2f}\n\n"
-        f"⚠️ تحقق من الشارت قبل الدخول."
+        f"💵 سعر الدخول : ${s['close']:.2f}\n"
+        f"🛑 وقف الخسارة : ${s['stop_loss']:.2f}  (-{s['risk_pct']:.2f}%)\n"
+        f"🎯 الهدف       : ${s['take_profit']:.2f}  (+{s['risk_pct']*RISK_REWARD:.2f}%)\n\n"
+        f"🚀 صعود اليوم: +{s['daily_return']:.2f}%\n"
+        f"{rel_line}"
+        f"📍 VWAP: ${s['vwap']:.2f} ✅\n"
+        f"📊 RVOL: {s['volume']/s['avg_volume']:.2f}x\n"
+        f"⚡ RSI: {s['rsi']:.1f}   🔥 ADX: {s['adx']:.1f}\n"
+        f"🔳 اختراق فوق ${s['highest_of_last_10']:.2f}\n\n"
+        f"⚠️ ضع وقف الخسارة فور الشراء. اخرج إن مشى عرضياً 30 دقيقة."
     )
+
 
 def safe_run_async(coro):
     try:
@@ -352,24 +413,29 @@ def safe_run_async(coro):
     except Exception as e:
         logging.error(f"Async error: {e}")
 
+
 def send_alert(symbol: str, signal: dict) -> None:
     safe_run_async(send_alert_async(symbol, signal))
 
+
 async def send_alert_async(symbol: str, signal: dict) -> None:
     await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal_message(symbol, signal))
+
 
 def send_startup_message(watchlist_size, timeframe):
     async def _send():
         text = (
             f"🤖 Sniper Bot شغال بنجاح!\n"
             f"يراقب {watchlist_size} سهم على الفريم {timeframe}m.\n"
-            f"جاهز لإرسال الإشارات ✅"
+            f"✅ تم إصلاح قراءة الشمعة المكتملة\n"
+            f"✅ وقف الخسارة والهدف مضافين"
         )
         await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
     try:
         safe_run_async(_send())
     except Exception as exc:
         logging.error(f"Startup message failed: {exc}")
+
 
 def send_heartbeat() -> None:
     async def _send():
@@ -382,6 +448,7 @@ def send_heartbeat() -> None:
     except Exception as exc:
         logging.error(f"Heartbeat failed: {exc}")
 
+
 def send_error_message(text: str) -> None:
     async def _send():
         await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ خطأ: {text}")
@@ -391,7 +458,7 @@ def send_error_message(text: str) -> None:
         pass
 
 # =============================================================================
-# Alert State Tracking
+# Alert State
 # =============================================================================
 
 def load_alerted_bars() -> dict:
@@ -443,6 +510,7 @@ def is_market_open() -> bool:
     market_end = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
     return market_start <= now_utc <= market_end
 
+
 def check_credentials_soft() -> bool:
     missing = [
         name for name, value in [
@@ -455,32 +523,25 @@ def check_credentials_soft() -> bool:
         return False
     return True
 
+
 def scan_once(state: dict) -> None:
-    t_total_start = time.monotonic()
+    t_total = time.monotonic()
 
-    t_download_start = time.monotonic()
+    t_dl = time.monotonic()
     all_dfs, missing_tickers = fetch_all_bars_bulk(TICKERS)
-    download_time = time.monotonic() - t_download_start
+    download_time = time.monotonic() - t_dl
 
-    t_analysis_start = time.monotonic()
+    bench_return = compute_benchmark_return(all_dfs)
+
+    t_an = time.monotonic()
     signals_count = 0
     rejected_count = 0
-    reasons_counter = Counter()
-
-    filter_pass_counts = {
-        "EMA Trend": 0,
-        "VWAP": 0,
-        "RSI": 0,
-        "ADX": 0,
-        "Volume": 0,
-        "Breakout": 0
-    }
-
-    scanned_count = len(TICKERS)
+    reasons = Counter()
+    filter_pass = {"EMA Trend": 0, "VWAP": 0, "RSI": 0, "ADX": 0, "Volume": 0, "Breakout": 0}
 
     for symbol in TICKERS:
         if symbol in missing_tickers or symbol not in all_dfs:
-            reasons_counter["Missing Data"] += 1
+            reasons["Missing Data"] += 1
             rejected_count += 1
             continue
 
@@ -488,53 +549,51 @@ def scan_once(state: dict) -> None:
         bar_time_iso = df.index[-1].isoformat()
 
         if already_alerted(state, symbol, bar_time_iso):
-            reasons_counter["Already Alerted"] += 1
+            reasons["Already Alerted"] += 1
             rejected_count += 1
             continue
 
-        signal, reject_reason, f_stats = evaluate_signal(df)
+        signal, reject_reason, f_stats = evaluate_signal(df, bench_return)
 
-        for key, val in f_stats.items():
-            if val:
-                filter_pass_counts[key] += 1
+        for k, v in f_stats.items():
+            if v:
+                filter_pass[k] += 1
 
         if signal is None:
-            reasons_counter[reject_reason] += 1
+            reasons[reject_reason] += 1
             rejected_count += 1
             if DEBUG:
                 logging.info(f"{symbol} ❌ {reject_reason}")
             continue
 
-        if DEBUG:
-            logging.info(f"{symbol} ✅ PASS @ ${signal['close']:.2f}")
-
+        logging.info(f"✅ SIGNAL {symbol} @ ${signal['close']:.2f} | SL ${signal['stop_loss']:.2f} | TP ${signal['take_profit']:.2f}")
         send_alert(symbol, signal)
         mark_alerted(state, symbol, bar_time_iso)
         save_alerted_bars(state)
         signals_count += 1
 
-    analysis_time = time.monotonic() - t_analysis_start
-    total_time = time.monotonic() - t_total_start
+    analysis_time = time.monotonic() - t_an
+    total_time = time.monotonic() - t_total
 
-    report = []
-    report.append("\n========== Scan Summary ==========")
-    report.append(f"Scanned  : {scanned_count}")
+    bench_txt = f"{bench_return:+.2f}%" if bench_return is not None else "N/A"
+
+    report = ["\n========== Scan Summary =========="]
+    report.append(f"Market (QQQ) : {bench_txt}")
+    report.append(f"Scanned  : {len(TICKERS)}")
     report.append(f"Signals  : {signals_count}")
     report.append(f"Rejected : {rejected_count}\n")
-    report.append("Top Reject Reasons\n")
-    for idx, (reason, count) in enumerate(reasons_counter.most_common(), start=1):
-        pct = (count / scanned_count) * 100 if scanned_count > 0 else 0
-        report.append(f"{idx}- {reason:<22} : {count:<2} ({pct:.0f}%)")
-    report.append("\n============================\n")
-    report.append("Filter Statistics\n")
-    for f_name in ["EMA Trend", "VWAP", "RSI", "ADX", "Volume", "Breakout"]:
-        report.append(f"{f_name:<16} : {filter_pass_counts[f_name]} PASS")
-    report.append("\n============================\n")
-    report.append(f"Download : {download_time:.2f}s")
-    report.append(f"Analysis : {analysis_time:.2f}s")
-    report.append(f"Total    : {total_time:.2f}s\n")
+    report.append("Top Reject Reasons")
+    for i, (reason, count) in enumerate(reasons.most_common(6), start=1):
+        pct = count / len(TICKERS) * 100
+        report.append(f"{i}- {reason:<22}: {count:<3} ({pct:.0f}%)")
+    report.append("\nFilter Statistics")
+    for f in ["EMA Trend", "VWAP", "RSI", "ADX", "Volume", "Breakout"]:
+        report.append(f"{f:<16}: {filter_pass[f]} PASS")
+    report.append(f"\nDownload {download_time:.2f}s | Analysis {analysis_time:.2f}s | Total {total_time:.2f}s")
+    report.append("==================================\n")
 
     logging.info("\n".join(report))
+
 
 def main() -> None:
     start_health_server()
@@ -558,14 +617,13 @@ def main() -> None:
             current_time = datetime.now(timezone.utc)
             current_minute = current_time.minute
 
-            # ✅ تعديل 5: الفحص كل 30 دقيقة بدل 15
             if current_minute % 30 == 0 and current_minute != last_scan_minute:
                 if is_market_open():
                     logging.info(f"⏰ [{current_time.strftime('%H:%M')}] بدء الفحص...")
-                    time.sleep(10)  # انتظر 10 ثواني للتأكد من إغلاق الشمعة
+                    time.sleep(20)   # مهلة لضمان توفر الشمعة المغلقة لدى Yahoo
                     scan_once(state)
                 else:
-                    logging.info(f"💤 السوق مغلق...")
+                    logging.info("💤 السوق مغلق...")
                 last_scan_minute = current_minute
 
             time.sleep(10)
@@ -574,6 +632,7 @@ def main() -> None:
             logging.exception(f"Main loop error: {exc}")
             send_error_message(str(exc))
             time.sleep(POLL_SECONDS)
+
 
 if __name__ == "__main__":
     main()
