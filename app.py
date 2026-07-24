@@ -1,5 +1,5 @@
 """
-Sniper Bot — 15-minute long-setup scanner with Telegram alerts.
+Sniper Bot — 30-minute long-setup scanner with Telegram alerts.
 Customized output report, Filter Statistics, and DEBUG mode control.
 Engineered for Railway / Cloud deployment.
 """
@@ -16,7 +16,6 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
-# توجيه مجلد الكاش إلى /tmp لمنع تحذيرات الصلاحيات في Railway
 yf.set_tz_cache_location("/tmp")
 
 from flask import Flask
@@ -26,13 +25,11 @@ from telegram import Bot
 # Configuration & Controls
 # =============================================================================
 
-# وضع التصحيح: اجعله False لطباعة الملخص فقط، أو True لطباعة تفاصيل كل سهم
 DEBUG = False
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# إعداد السجلات
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 _raw_tickers = [
@@ -48,10 +45,12 @@ _raw_tickers = [
 
 TICKERS = sorted(list(set(_raw_tickers)))
 
-TIMEFRAME_MINUTES = 15
+# ✅ تعديل 1: تغيير التايم فريم من 15 إلى 30 دقيقة
+TIMEFRAME_MINUTES = 30
 
-# إعدادات الفلاتر
-CANDLE_BODY_MIN = 0.5     # تم خفضها إلى 0.5 (50%)
+# ✅ تعديل 2: تخفيف شرط الشمعة من 50% إلى 40% عشان يمر أسهم أكثر
+CANDLE_BODY_MIN = 0.4
+
 VOLUME_MULTIPLIER = 1.3
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
@@ -85,10 +84,11 @@ PORT = int(os.environ.get("PORT", 8080))
 def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], list[str]]:
     try:
         tickers_str = " ".join(tickers_list)
+        # ✅ تعديل 3: تغيير interval من 15m إلى 30m
         data = yf.download(
             tickers=tickers_str,
             period="1mo",
-            interval="15m",
+            interval="30m",
             group_by="ticker",
             progress=False,
             auto_adjust=False
@@ -197,43 +197,35 @@ def evaluate_signal(df: pd.DataFrame) -> tuple[dict | None, str | None, dict]:
     ema_slow = last[f"ema{EMA_SLOW}"]
     ema_long = last[f"ema{EMA_LONG}"]
 
-    # 10 شمعات
     previous_10_bars = df.iloc[-11:-1] if len(df) >= 12 else df.iloc[:-1]
     highest_of_last_10 = previous_10_bars["high"].max() if not previous_10_bars.empty else high
     target_breakout_price = highest_of_last_10 * 1.002
 
-    # فحص الفلاتر بشكل فردي للإحصائيات
+    # إحصائيات الفلاتر
     if (ema_slow > ema_long) and (ema_fast > ema_mid > ema_slow) and (close > ema_fast):
         filter_stats["EMA Trend"] = True
-
     if close > vwap:
         filter_stats["VWAP"] = True
-
     if RSI_MIN <= rsi <= RSI_MAX:
         filter_stats["RSI"] = True
-
     if ADX_MIN <= adx <= ADX_MAX:
         filter_stats["ADX"] = True
-
     dollar_volume = close * volume
     rvol = volume / avg_volume if avg_volume > 0 else 0
     if (rvol > VOLUME_MULTIPLIER) and (volume > avg_volume) and (dollar_volume >= MIN_DOLLAR_VOLUME):
         filter_stats["Volume"] = True
-
     if close > target_breakout_price:
         filter_stats["Breakout"] = True
 
-    # -------------------------------------------------------------
-    # شروط الرفض التسلسلية
-    # -------------------------------------------------------------
+    # شروط الرفض
     candle_range = high - low
     if candle_range == 0:
         return None, "No Range Candle", filter_stats
 
-    # شمعة صاعدة قوية >= 50%
+    # ✅ تعديل 4: شرط الشمعة 40% بدل 50%
     strong_candle = (close - open_price) > candle_range * CANDLE_BODY_MIN
     if not strong_candle:
-        return None, "Candle <50%", filter_stats
+        return None, "Candle <40%", filter_stats
 
     candle_size_pct = candle_range / close
     if candle_size_pct > MAX_CANDLE_RANGE:
@@ -336,7 +328,6 @@ def _get_bot() -> Bot:
 def format_signal_message(symbol: str, signal: dict) -> str:
     bar_time = signal["bar_time"]
     bar_time_str = bar_time.strftime("%Y-%m-%d %H:%M UTC") if isinstance(bar_time, datetime) else str(bar_time)
-    
     return (
         f"🎯 SNIPER BREAKOUT — {symbol}\n"
         f"سهم: {symbol}\n"
@@ -365,10 +356,7 @@ def send_alert(symbol: str, signal: dict) -> None:
     safe_run_async(send_alert_async(symbol, signal))
 
 async def send_alert_async(symbol: str, signal: dict) -> None:
-    await _get_bot().send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=format_signal_message(symbol, signal)
-    )
+    await _get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal_message(symbol, signal))
 
 def send_startup_message(watchlist_size, timeframe):
     async def _send():
@@ -470,12 +458,10 @@ def check_credentials_soft() -> bool:
 def scan_once(state: dict) -> None:
     t_total_start = time.monotonic()
 
-    # 1) التحميل الجماعي
     t_download_start = time.monotonic()
     all_dfs, missing_tickers = fetch_all_bars_bulk(TICKERS)
     download_time = time.monotonic() - t_download_start
 
-    # 2) التحليل والفلترة
     t_analysis_start = time.monotonic()
     signals_count = 0
     rejected_count = 0
@@ -496,24 +482,18 @@ def scan_once(state: dict) -> None:
         if symbol in missing_tickers or symbol not in all_dfs:
             reasons_counter["Missing Data"] += 1
             rejected_count += 1
-            if DEBUG:
-                logging.info(f"{symbol}\n0 bars\n❌ Missing Data\n")
             continue
 
         df = all_dfs[symbol]
-        bars_count = len(df)
-
         bar_time_iso = df.index[-1].isoformat()
+
         if already_alerted(state, symbol, bar_time_iso):
             reasons_counter["Already Alerted"] += 1
             rejected_count += 1
-            if DEBUG:
-                logging.info(f"{symbol}\n{bars_count} bars\n❌ Already Alerted\n")
             continue
 
         signal, reject_reason, f_stats = evaluate_signal(df)
 
-        # تجميع إحصائيات الفلاتر
         for key, val in f_stats.items():
             if val:
                 filter_pass_counts[key] += 1
@@ -522,11 +502,11 @@ def scan_once(state: dict) -> None:
             reasons_counter[reject_reason] += 1
             rejected_count += 1
             if DEBUG:
-                logging.info(f"{symbol}\n{bars_count} bars\n❌ {reject_reason}\n")
+                logging.info(f"{symbol} ❌ {reject_reason}")
             continue
 
         if DEBUG:
-            logging.info(f"{symbol}\n{bars_count} bars\n✅ PASS\n")
+            logging.info(f"{symbol} ✅ PASS @ ${signal['close']:.2f}")
 
         send_alert(symbol, signal)
         mark_alerted(state, symbol, bar_time_iso)
@@ -536,23 +516,19 @@ def scan_once(state: dict) -> None:
     analysis_time = time.monotonic() - t_analysis_start
     total_time = time.monotonic() - t_total_start
 
-    # 3) طباعة التقرير بالصيغة المطلوبة تماماً
     report = []
     report.append("\n========== Scan Summary ==========")
     report.append(f"Scanned  : {scanned_count}")
     report.append(f"Signals  : {signals_count}")
     report.append(f"Rejected : {rejected_count}\n")
-
     report.append("Top Reject Reasons\n")
     for idx, (reason, count) in enumerate(reasons_counter.most_common(), start=1):
         pct = (count / scanned_count) * 100 if scanned_count > 0 else 0
         report.append(f"{idx}- {reason:<22} : {count:<2} ({pct:.0f}%)")
-
     report.append("\n============================\n")
     report.append("Filter Statistics\n")
     for f_name in ["EMA Trend", "VWAP", "RSI", "ADX", "Volume", "Breakout"]:
         report.append(f"{f_name:<16} : {filter_pass_counts[f_name]} PASS")
-
     report.append("\n============================\n")
     report.append(f"Download : {download_time:.2f}s")
     report.append(f"Analysis : {analysis_time:.2f}s")
@@ -582,12 +558,14 @@ def main() -> None:
             current_time = datetime.now(timezone.utc)
             current_minute = current_time.minute
 
-            if current_minute % 15 == 0 and current_minute != last_scan_minute:
+            # ✅ تعديل 5: الفحص كل 30 دقيقة بدل 15
+            if current_minute % 30 == 0 and current_minute != last_scan_minute:
                 if is_market_open():
+                    logging.info(f"⏰ [{current_time.strftime('%H:%M')}] بدء الفحص...")
+                    time.sleep(10)  # انتظر 10 ثواني للتأكد من إغلاق الشمعة
                     scan_once(state)
                 else:
-                    logging.info(f"💤 [الدقيقة {current_minute}]: السوق مغلق حالياً...")
-                
+                    logging.info(f"💤 السوق مغلق...")
                 last_scan_minute = current_minute
 
             time.sleep(10)
