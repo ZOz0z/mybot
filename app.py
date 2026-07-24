@@ -12,7 +12,6 @@ Sniper Bot — DAILY swing scanner with Telegram alerts.
   • القوة النسبية مقابل QQQ على 5 أيام
 """
 
-import asyncio
 from collections import Counter
 import json
 import logging
@@ -27,8 +26,8 @@ import yfinance as yf
 
 yf.set_tz_cache_location("/tmp")
 
+import requests
 from flask import Flask
-from telegram import Bot
 
 # =============================================================================
 # Configuration
@@ -376,60 +375,39 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
 # Telegram
 # =============================================================================
 
-_bot: Bot | None = None
-
-def _get_bot() -> Bot:
-    global _bot
-    if _bot is None:
-        _bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    return _bot
+TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-def format_signal_message(symbol: str, s: dict) -> str:
-    d = s["bar_date"]
-    date_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+def send_msg(text: str) -> bool:
+    """
+    إرسال مباشر عبر HTTP — بلا asyncio، فلا مشكلة event loop إطلاقاً.
+    يعيد المحاولة 3 مرات قبل الاستسلام.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.error("بيانات تيليجرام ناقصة")
+        return False
 
-    if s["rel_strength"] is None:
-        rel = "📊 القوة النسبية: غير متاحة\n"
-    elif s["rel_strength"] > 0:
-        rel = f"💪 أقوى من السوق بـ {s['rel_strength']:+.1f}% خلال 5 أيام\n"
-    else:
-        rel = f"⚠️ أضعف من السوق بـ {s['rel_strength']:.1f}% خلال 5 أيام\n"
+    url = TELEGRAM_API.format(token=TELEGRAM_BOT_TOKEN)
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
 
-    ed = s.get("earnings_date")
-    earn = f"🗓 الأرباح القادمة: {ed} (بعيدة ✅)\n\n" if ed else "🗓 لا يوجد تاريخ أرباح قريب معروف\n\n"
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(url, json=payload, timeout=20)
+            if r.status_code == 200:
+                return True
+            logging.error(f"تيليجرام رد {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logging.error(f"محاولة إرسال {attempt} فشلت: {e}")
+        time.sleep(2 * attempt)
 
-    return (
-        f"🎯 صيدة يومية — {symbol}\n"
-        f"شمعة {date_str}\n\n"
-        f"💵 الدخول      : ${s['close']:.2f}\n"
-        f"🛑 وقف الخسارة : ${s['stop_loss']:.2f}   (-{s['risk_pct']:.1f}%)\n"
-        f"🎯 الهدف       : ${s['take_profit']:.2f}   (+{s['risk_pct']*RISK_REWARD:.1f}%)\n\n"
-        f"🔳 اخترق قمة 20 يوم عند ${s['breakout_level']:.2f}\n"
-        f"📈 اليوم: {s['daily_return']:+.1f}%   |   بُعده عن EMA20: {s['extension']:.1f}%\n"
-        f"{rel}"
-        f"📊 RVOL: {s['rvol']:.2f}x   |   سيولة: ${s['dollar_volume']:,.0f}\n"
-        f"⚡ RSI: {s['rsi']:.0f}   |   🔥 ADX: {s['adx']:.0f}\n\n"
-        f"{earn}"
-        f"📋 الخطة: ادخل بأمر شراء عند الفتح، وضع وقف الخسارة فوراً.\n"
-        f"⚠️ لا تخاطر بأكثر من 25% من رأس مالك في صفقة واحدة."
-    )
+    return False
 
 
-def safe_run(coro):
-    try:
-        asyncio.run(coro)
-    except Exception as e:
-        logging.error(f"Async error: {e}")
+def send_alert(symbol: str, signal: dict) -> None:
+    ok = send_msg(format_signal_message(symbol, signal))
+    if not ok:
+        logging.error(f"⚠️ فشل إرسال تنبيه {symbol} إلى تيليجرام")
 
-
-def send_alert(symbol, signal):
-    safe_run(_get_bot().send_message(chat_id=TELEGRAM_CHAT_ID,
-                                     text=format_signal_message(symbol, signal)))
-
-
-def send_msg(text: str):
-    safe_run(_get_bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text))
 
 # =============================================================================
 # State
