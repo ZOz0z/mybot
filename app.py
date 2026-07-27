@@ -64,7 +64,15 @@ _added = [
     "MXL", "COHU", "PLAB", "UCTT", "ICHR", "AOSL", "ACMR", "LITE", "NVTS"
 ]
 
-TICKERS = sorted(set(_original + _added))
+# ---- الدفعة الثالثة المعتمدة شرعياً (35 سهم) ----
+_added2 = [
+    "MRAM", "LASR", "KLIC", "ADEA", "VSH", "TTMI", "KN", "CTS", "AXTI", "DAKT",
+    "YELP", "VIPS", "SUPN", "HRMY", "OMCL", "NEO", "CDNA", "TXG", "SHLS", "FLR",
+    "HUBG", "RXO", "SNDR", "MRTN", "CVLG", "UUUU", "PAAS", "SVM", "OR", "SHOO",
+    "LOVE", "HVT", "BBW", "WRBY", "FIGS",
+]
+
+TICKERS = sorted(set(_original + _added + _added2))
 
 BENCHMARK = "QQQ"
 
@@ -95,6 +103,12 @@ MAX_DAILY_RETURN = 0.10           # لا يكون قافز أكثر من 10% ا�
 # ---- فلتر الأرباح ----
 EARNINGS_BLACKOUT_DAYS = 7    # تجاهل السهم إذا كانت أرباحه خلال هذا العدد من الأيام
 EARNINGS_CACHE_HOURS = 24     # تحديث تواريخ الأرباح مرة كل 24 ساعة
+
+# ---- نظام تقييم قوة الإشارة (مجموعه 100) ----
+W_REL_STRENGTH = 30   # التفوق على السوق
+W_RVOL         = 25   # قوة الحجم
+W_ADX          = 25   # وضوح الاتجاه
+W_PROXIMITY    = 20   # قرب السعر من EMA20 (دخول نظيف)
 
 # ---- إدارة المخاطر ----
 ATR_STOP_MULT = 2.0
@@ -257,6 +271,38 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # Signal evaluation
 # =============================================================================
 
+def _scale(value, lo, hi, weight) -> float:
+    """يحوّل قيمة إلى نقاط ضمن النطاق [lo, hi] مضروبة في وزنها."""
+    if value is None:
+        return weight * 0.5          # قيمة محايدة عند غياب البيانات
+    if hi == lo:
+        return weight * 0.5
+    ratio = (value - lo) / (hi - lo)
+    ratio = max(0.0, min(1.0, ratio))
+    return weight * ratio
+
+
+def score_signal(sig: dict) -> float:
+    """
+    يحسب قوة الإشارة من 100.
+    كلما ارتفع الرقم كانت الإشارة أنقى وأجدر بالدخول.
+    """
+    # 1) القوة النسبية: من -5% (ضعيف) إلى +15% (متفوق بقوة)
+    pts_rel = _scale(sig.get("rel_strength"), -5.0, 15.0, W_REL_STRENGTH)
+
+    # 2) الحجم: من 1.3x (الحد الأدنى المقبول) إلى 4x (انفجار حجم)
+    pts_vol = _scale(sig.get("rvol"), 1.3, 4.0, W_RVOL)
+
+    # 3) الاتجاه: من 20 (بداية اتجاه) إلى 45 (اتجاه قوي جداً)
+    pts_adx = _scale(sig.get("adx"), 20.0, 45.0, W_ADX)
+
+    # 4) القرب من EMA20: كلما قلّ البعد زادت النقاط (معكوس)
+    ext = sig.get("extension")
+    pts_prox = W_PROXIMITY - _scale(ext, 0.0, 12.0, W_PROXIMITY) if ext is not None else W_PROXIMITY * 0.5
+
+    return round(pts_rel + pts_vol + pts_adx + pts_prox, 1)
+
+
 def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | None, str | None, dict]:
     df = compute_indicators(df)
 
@@ -403,10 +449,73 @@ def send_msg(text: str) -> bool:
     return False
 
 
-def send_alert(symbol: str, signal: dict) -> None:
-    ok = send_msg(format_signal_message(symbol, signal))
-    if not ok:
-        logging.error(f"⚠️ فشل إرسال تنبيه {symbol} إلى تيليجرام")
+def _grade(score: float) -> str:
+    if score >= 75:
+        return "🥇 ممتازة"
+    if score >= 60:
+        return "🥈 قوية"
+    if score >= 45:
+        return "🥉 مقبولة"
+    return "⚪ ضعيفة"
+
+
+def format_batch_message(signals: list, bench_5d) -> str:
+    """
+    رسالة واحدة تضم كل صيدات اليوم، مرتبة من الأقوى للأضعف،
+    وكل صيدة معها سعر الدخول ووقف الخسارة والهدف.
+    """
+    signals = sorted(signals, key=lambda x: x[1]["score"], reverse=True)
+
+    d = signals[0][1]["bar_date"]
+    date_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+    bench_txt = f"{bench_5d:+.1f}%" if bench_5d is not None else "غير متاح"
+
+    lines = [
+        f"🎯 صيدات اليوم — {len(signals)}",
+        f"شمعة {date_str}  |  السوق (QQQ 5 أيام): {bench_txt}",
+        "",
+        "مرتبة من الأقوى للأضعف 👇",
+    ]
+
+    for rank, (symbol, sg) in enumerate(signals, start=1):
+        if sg["rel_strength"] is None:
+            rel = "القوة النسبية غير متاحة"
+        elif sg["rel_strength"] > 0:
+            rel = f"أقوى من السوق بـ {sg['rel_strength']:+.1f}%"
+        else:
+            rel = f"أضعف من السوق بـ {sg['rel_strength']:.1f}%"
+
+        ed = sg.get("earnings_date")
+        earn = f"🗓 أرباح: {ed}" if ed else "🗓 لا أرباح قريبة"
+
+        lines += [
+            "━━━━━━━━━━━━━━━━━━",
+            f"{rank}) {symbol}   {sg['score']}/100  {_grade(sg['score'])}",
+            "",
+            f"💵 الدخول      : ${sg['close']:.2f}",
+            f"🛑 وقف الخسارة : ${sg['stop_loss']:.2f}   (-{sg['risk_pct']:.1f}%)",
+            f"🎯 الهدف       : ${sg['take_profit']:.2f}   (+{sg['risk_pct']*RISK_REWARD:.1f}%)",
+            "",
+            f"🔳 اخترق قمة 20 يوم عند ${sg['breakout_level']:.2f}",
+            f"💪 {rel}",
+            f"📊 RVOL {sg['rvol']:.2f}x  |  ⚡ RSI {sg['rsi']:.0f}  |  🔥 ADX {sg['adx']:.0f}",
+            f"📏 بُعده عن EMA20: {sg['extension']:.1f}%",
+            earn,
+        ]
+
+    lines += [
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "📋 الخطة:",
+        "• انتظر 15 دقيقة بعد الفتح ثم ادخل بأمر محدد",
+        "• إن فتح أعلى من سعر الدخول بأكثر من 2% → تجاهله",
+        "• ضع وقف الخسارة فوراً بعد التنفيذ",
+        "• اخرج إن لم يتحرك خلال 10 أيام تداول",
+        "",
+        "⚠️ برأس مال صغير اكتفِ بالصيدة الأولى فقط.",
+    ]
+
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -453,6 +562,7 @@ def scan_once(state: dict):
 
     signals = 0
     rejected = 0
+    found = []          # كل الصيدات تُجمَّع هنا ثم تُرسل في رسالة واحدة
     reasons = Counter()
     passes = {"EMA Trend": 0, "RSI": 0, "ADX": 0, "Volume": 0, "Breakout": 0}
 
@@ -491,12 +601,24 @@ def scan_once(state: dict):
             continue
 
         signal["earnings_date"] = edate
+        signal["score"] = score_signal(signal)
 
-        logging.info(f"✅ SIGNAL {symbol} @ ${signal['close']:.2f} | SL ${signal['stop_loss']:.2f} | TP ${signal['take_profit']:.2f}")
-        send_alert(symbol, signal)
+        logging.info(
+            f"✅ SIGNAL {symbol} | {signal['score']}/100 | ${signal['close']:.2f} "
+            f"| SL ${signal['stop_loss']:.2f} | TP ${signal['take_profit']:.2f}"
+        )
+        found.append((symbol, signal))
         state[symbol] = bar_key
-        save_state(state)
         signals += 1
+
+    # ── إرسال رسالة واحدة تضم كل الصيدات مرتبة ──
+    if found:
+        save_state(state)
+        ok = send_msg(format_batch_message(found, bench_5d))
+        if not ok:
+            logging.error("⚠️ فشل إرسال رسالة الصيدات إلى تيليجرام")
+        top = max(found, key=lambda x: x[1]["score"])
+        logging.info(f"🏆 الأقوى اليوم: {top[0]} بـ {top[1]['score']}/100")
 
     elapsed = time.monotonic() - t0
     bench_txt = f"{bench_5d:+.2f}%" if bench_5d is not None else "N/A"
