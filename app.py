@@ -9,7 +9,7 @@ Sniper Bot — DAILY swing scanner with Telegram alerts.
   • حُذف VWAP (لا معنى له على الفريم اليومي)
   • الاختراق أصبح فوق أعلى قمة 20 يوم بدل 10 شمعات
   • وقف الخسارة 2×ATR بحد أقصى 8%  |  الهدف = ضعف المخاطرة
-  • القوة النسبية مقابل QQQ على 5 أيام
+  • القوة النسبية مقابل SPY على 5 أيام (يغطي كل القطاعات لا التقنية فقط)
 """
 
 from collections import Counter
@@ -74,7 +74,13 @@ _added2 = [
 
 TICKERS = sorted(set(_original + _added + _added2))
 
-BENCHMARK = "QQQ"
+# المؤشر المرجعي لحساب القوة النسبية.
+# SPY يتبع S&P 500 (500 شركة من كل القطاعات) وهو الأنسب لقائمة
+# مخلوطة بين ناسداك و NYSE: تقنية، طاقة، تعدين، صناعة، نقل.
+BENCHMARK = "SPY"
+
+# مؤشر إضافي يُعرض للعلم فقط ولا يدخل في أي حساب.
+SECONDARY_INDEX = "QQQ"
 
 # ---- إعدادات المؤشرات (يومية) ----
 VOLUME_MULTIPLIER = 1.3      # حجم اليوم مقابل متوسط 20 يوم
@@ -132,7 +138,7 @@ PORT = int(os.environ.get("PORT", 8080))
 def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], list[str]]:
     """تحميل جماعي لشموع يومية بطلب واحد. آخر شمعة يومية مغلقة بالفعل بعد الإغلاق."""
     try:
-        download_list = list(dict.fromkeys(tickers_list + [BENCHMARK]))
+        download_list = list(dict.fromkeys(tickers_list + [BENCHMARK, SECONDARY_INDEX]))
         data = yf.download(
             tickers=" ".join(download_list),
             period="2y",          # سنتان تكفيان لحساب EMA200 بدقة
@@ -166,9 +172,9 @@ def fetch_all_bars_bulk(tickers_list: list) -> tuple[dict[str, pd.DataFrame], li
                     c = _clean(data[t])
                     if c is not None:
                         all_dfs[t] = c
-                    elif t != BENCHMARK:
+                    elif t not in (BENCHMARK, SECONDARY_INDEX):
                         missing.append(t)
-                elif t != BENCHMARK:
+                elif t not in (BENCHMARK, SECONDARY_INDEX):
                     missing.append(t)
         else:
             c = _clean(data)
@@ -240,9 +246,9 @@ def has_earnings_soon(symbol: str) -> tuple[bool, object]:
     return (0 <= days <= EARNINGS_BLACKOUT_DAYS), d
 
 
-def benchmark_5d_return(all_dfs: dict) -> float | None:
-    """أداء مؤشر السوق خلال آخر 5 أيام."""
-    df = all_dfs.get(BENCHMARK)
+def index_5d_return(all_dfs: dict, symbol: str) -> float | None:
+    """أداء أي مؤشر خلال آخر 5 أيام."""
+    df = all_dfs.get(symbol)
     if df is None or len(df) < 6:
         return None
     try:
@@ -459,7 +465,7 @@ def _grade(score: float) -> str:
     return "⚪ ضعيفة"
 
 
-def format_batch_message(signals: list, bench_5d) -> str:
+def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
     """
     رسالة واحدة تضم كل صيدات اليوم، مرتبة من الأقوى للأضعف،
     وكل صيدة معها سعر الدخول ووقف الخسارة والهدف.
@@ -469,10 +475,12 @@ def format_batch_message(signals: list, bench_5d) -> str:
     d = signals[0][1]["bar_date"]
     date_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
     bench_txt = f"{bench_5d:+.1f}%" if bench_5d is not None else "غير متاح"
+    qqq_txt   = f"{qqq_5d:+.1f}%" if qqq_5d is not None else "غير متاح"
 
     lines = [
         f"🎯 صيدات اليوم — {len(signals)}",
-        f"شمعة {date_str}  |  السوق (QQQ 5 أيام): {bench_txt}",
+        f"شمعة {date_str}",
+        f"📉 السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}",
         "",
         "مرتبة من الأقوى للأضعف 👇",
     ]
@@ -558,7 +566,8 @@ def scan_once(state: dict):
     logging.info(f"🔍 بدء الفحص اليومي لـ {len(TICKERS)} سهم...")
 
     all_dfs, missing = fetch_all_bars_bulk(TICKERS)
-    bench_5d = benchmark_5d_return(all_dfs)
+    bench_5d = index_5d_return(all_dfs, BENCHMARK)          # SPY — يدخل في الحساب
+    qqq_5d   = index_5d_return(all_dfs, SECONDARY_INDEX)    # QQQ — للعرض فقط
 
     signals = 0
     rejected = 0
@@ -614,7 +623,7 @@ def scan_once(state: dict):
     # ── إرسال رسالة واحدة تضم كل الصيدات مرتبة ──
     if found:
         save_state(state)
-        ok = send_msg(format_batch_message(found, bench_5d))
+        ok = send_msg(format_batch_message(found, bench_5d, qqq_5d))
         if not ok:
             logging.error("⚠️ فشل إرسال رسالة الصيدات إلى تيليجرام")
         top = max(found, key=lambda x: x[1]["score"])
@@ -622,9 +631,11 @@ def scan_once(state: dict):
 
     elapsed = time.monotonic() - t0
     bench_txt = f"{bench_5d:+.2f}%" if bench_5d is not None else "N/A"
+    qqq_txt   = f"{qqq_5d:+.2f}%" if qqq_5d is not None else "N/A"
 
     rep = ["\n========== Daily Scan =========="]
-    rep.append(f"QQQ (5 أيام) : {bench_txt}")
+    rep.append(f"SPY (5 أيام) : {bench_txt}   ← مرجع القوة النسبية")
+    rep.append(f"QQQ (5 أيام) : {qqq_txt}   ← للعلم فقط")
     rep.append(f"Scanned  : {len(TICKERS)}")
     rep.append(f"Signals  : {signals}")
     rep.append(f"Rejected : {rejected}\n")
@@ -639,7 +650,10 @@ def scan_once(state: dict):
     logging.info("\n".join(rep))
 
     if signals == 0:
-        send_msg(f"📭 فحص اليوم انتهى — لا توجد صيدة.\nالسوق (QQQ 5 أيام): {bench_txt}")
+        send_msg(
+            "📭 فحص اليوم انتهى — لا توجد صيدة.\n"
+            f"السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}"
+        )
 
 # =============================================================================
 # Main
