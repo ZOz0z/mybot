@@ -72,7 +72,16 @@ _added2 = [
     "LOVE", "HVT", "BBW", "WRBY", "FIGS",
 ]
 
-TICKERS = sorted(set(_original + _added + _added2))
+# ---- الدفعة الرابعة المعتمدة شرعياً (45 سهم) ----
+_added3 = [
+    "POWI", "DIOD", "LSCC", "RMBS", "SLAB", "SYNA", "SANM", "BHE", "OSIS", "VICR",
+    "ROG", "ONTO", "CALX", "EXTR", "NTGR", "DGII", "ADTN", "HLIT", "CSGS", "HALO",
+    "CORT", "VCEL", "ARDX", "AXSM", "FOLD", "USPH", "MYRG", "PRIM", "ROAD", "TPC",
+    "GVA", "PTEN", "WHD", "RES", "LBRT", "MUR", "EGO", "AGI", "BOOT", "SCVL",
+    "ZUMZ", "URBN", "VRA", "LEVI", "MOV",
+]
+
+TICKERS = sorted(set(_original + _added + _added2 + _added3))
 
 # المؤشر المرجعي لحساب القوة النسبية.
 # SPY يتبع S&P 500 (500 شركة من كل القطاعات) وهو الأنسب لقائمة
