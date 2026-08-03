@@ -115,6 +115,19 @@ MAX_CANDLE_RANGE = 0.15           # تجنّب أيام الجنون (>15%)
 MAX_EXTENSION = 0.12              # لا يبعد أكثر من 12% عن EMA20
 MAX_DAILY_RETURN = 0.10           # لا يكون قافز أكثر من 10% اليوم
 
+# ---- الفلاتر النوعية الثلاثة الجديدة ----
+
+# 1) التجميع الضيق: يشترط أن يسبق الاختراقَ انضغاطٌ في السعر.
+#    اختراق بعد هدوء = حسم اتجاه. اختراق بعد تذبذب عنيف = ضوضاء.
+CONSOLIDATION_DAYS = 8          # عدد الأيام السابقة للاختراق التي نقيس ضيقها
+MAX_CONSOLIDATION_RANGE = 0.14  # أقصى اتساع مسموح لتلك الفترة (14%)
+
+# 2) الدخول المتأخر: يمنع الشراء بعد أن يكون السهم قد ابتعد عن نقطة الاختراق.
+MAX_ABOVE_BREAKOUT = 0.04       # أقصى ارتفاع فوق مستوى الاختراق (4%)
+
+# 3) الحجم النسبي على 5 أيام بدل يوم واحد شاذ.
+RVOL_DAYS = 5                   # متوسط حجم آخر 5 أيام مقابل متوسط 20 يوماً
+
 # ---- فلتر الأرباح ----
 EARNINGS_BLACKOUT_DAYS = 7    # تجاهل السهم إذا كانت أرباحه خلال هذا العدد من الأيام
 EARNINGS_CACHE_HOURS = 24     # تحديث تواريخ الأرباح مرة كل 24 ساعة
@@ -346,7 +359,11 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
     breakout_price = highest * BREAKOUT_BUFFER
 
     dollar_volume = close * volume
-    rvol = volume / avg_volume if avg_volume > 0 else 0
+
+    # الحجم النسبي على متوسط آخر 5 أيام — أصدق من يوم واحد قد يكون شاذاً
+    recent_vol = df["volume"].iloc[-RVOL_DAYS:].mean()
+    rvol = recent_vol / avg_volume if avg_volume > 0 else 0
+    rvol_today = volume / avg_volume if avg_volume > 0 else 0
 
     # --- إحصائيات ---
     if ema_f > ema_m > ema_s > ema_l:
@@ -373,6 +390,23 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
     if close <= breakout_price:
         return None, f"No 20D Breakout", stats
 
+    # ── فلتر الدخول المتأخر ──
+    # لا نشتري سهماً ابتعد كثيراً فوق نقطة اختراقه؛ المخاطرة تكبر والفرصة تصغر.
+    above_breakout = (close - highest) / highest
+    if above_breakout > MAX_ABOVE_BREAKOUT:
+        return None, f"Late Entry ({above_breakout*100:.1f}% above)", stats
+
+    # ── فلتر التجميع الضيق ──
+    # نقيس اتساع السعر في الأيام السابقة للاختراق: كلما ضاق، كان الاختراق أصدق.
+    if len(df) >= CONSOLIDATION_DAYS + 2:
+        cons = df.iloc[-(CONSOLIDATION_DAYS + 1):-1]
+        c_high, c_low = cons["high"].max(), cons["low"].min()
+        cons_range = (c_high - c_low) / c_low if c_low > 0 else 1.0
+        if cons_range > MAX_CONSOLIDATION_RANGE:
+            return None, f"No Tight Base ({cons_range*100:.0f}%)", stats
+    else:
+        cons_range = None
+
     if dollar_volume < MIN_DOLLAR_VOLUME:
         return None, "Low Dollar Volume", stats
 
@@ -395,7 +429,7 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
         return None, f"Overextended ({extension*100:.1f}%)", stats
 
     if rvol <= VOLUME_MULTIPLIER:
-        return None, f"Low Volume ({rvol:.2f}x)", stats
+        return None, f"Low Volume 5d ({rvol:.2f}x)", stats
 
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return None, f"RSI Out ({rsi:.0f})", stats
@@ -420,6 +454,9 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
         "adx": float(adx),
         "atr": float(atr),
         "rvol": float(rvol),
+        "rvol_today": float(rvol_today),
+        "above_breakout": float(above_breakout * 100),
+        "cons_range": (float(cons_range * 100) if cons_range is not None else None),
         "dollar_volume": float(dollar_volume),
         "daily_return": float(daily_return * 100),
         "stock_5d": stock_5d,
@@ -515,8 +552,10 @@ def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
             "",
             f"🔳 اخترق قمة 20 يوم عند ${sg['breakout_level']:.2f}",
             f"💪 {rel}",
-            f"📊 RVOL {sg['rvol']:.2f}x  |  ⚡ RSI {sg['rsi']:.0f}  |  🔥 ADX {sg['adx']:.0f}",
-            f"📏 بُعده عن EMA20: {sg['extension']:.1f}%",
+            f"📊 RVOL 5أيام {sg['rvol']:.2f}x  |  ⚡ RSI {sg['rsi']:.0f}  |  🔥 ADX {sg['adx']:.0f}",
+            f"📏 بُعده عن EMA20: {sg['extension']:.1f}%  |  فوق الاختراق: {sg['above_breakout']:.1f}%",
+            (f"🤏 قاعدة ضيقة: {sg['cons_range']:.0f}% خلال {CONSOLIDATION_DAYS} أيام"
+             if sg.get('cons_range') is not None else "🤏 قاعدة: غير محسوبة"),
             earn,
         ]
 
