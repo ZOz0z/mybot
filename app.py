@@ -81,7 +81,20 @@ _added3 = [
     "ZUMZ", "URBN", "VRA", "LEVI", "MOV",
 ]
 
-TICKERS = sorted(set(_original + _added + _added2 + _added3))
+# ---- الدفعة الخامسة: شركات كبرى (85 سهم) ----
+_added4 = [
+    "NTAP", "WDC", "STX", "CIEN", "AKAM", "ZBRA", "KEYS", "TER", "ENTG", "MKSI",
+    "NXPI", "SWKS", "MCHP", "DOX", "EPAM", "CTSH", "IT", "SCSC", "CACI", "JCI",
+    "EMR", "ROK", "AME", "AOS", "DOV", "PNR", "IEX", "GGG", "NDSN", "CSL",
+    "MAS", "MLM", "VMC", "SSD", "AWI", "CHRW", "EXPD", "LSTR", "ODFL", "SAIA",
+    "XPO", "KEX", "MATX", "BKR", "NOV", "FTI", "TDW", "STLD", "NUE", "RS",
+    "CRS", "CENX", "LII", "WSO", "POOL", "SITE", "FAST", "UFPI", "TREX", "DKS",
+    "ASO", "WSM", "LZB", "ETD", "DECK", "SKX", "BKE", "ANF", "INGR", "CALM",
+    "SMPL", "INCY", "EXEL", "NBIX", "NVDA", "GOOGL", "GOOG", "AMZN", "ADBE", "KLAC",
+    "CVX", "QCOM", "ORCL", "CSCO", "NEM",
+]
+
+TICKERS = sorted(set(_original + _added + _added2 + _added3 + _added4))
 
 # المؤشر المرجعي لحساب القوة النسبية.
 # SPY يتبع S&P 500 (500 شركة من كل القطاعات) وهو الأنسب لقائمة
