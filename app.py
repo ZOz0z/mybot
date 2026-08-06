@@ -35,6 +35,9 @@ from flask import Flask
 
 DEBUG = False
 
+# فحص فوري عند الإقلاع (للاختبار). أعده إلى False بعد التجربة.
+RUN_ON_START = True
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -94,7 +97,22 @@ _added4 = [
     "CVX", "QCOM", "ORCL", "CSCO", "NEM",
 ]
 
-TICKERS = sorted(set(_original + _added + _added2 + _added3 + _added4))
+# ---- الدفعة السادسة: منتقاة من قائمة الأسهم الشرعية (101 سهم) ----
+_added5 = [
+    "ENSG", "MASI", "PODD", "DXCM", "EW", "MDT", "GILD", "BMRN", "LNTH", "IRTC",
+    "GMED", "MMSI", "RDNT", "ADUS", "HQY", "APH", "ALLE", "NVT", "ZS", "QLYS",
+    "CVLT", "OKTA", "TEAM", "ESTC", "SMTC", "CRUS", "AMBA", "TJX", "TPR", "CROX",
+    "OLLI", "DG", "DLTR", "TGT", "BJ", "SBUX", "MNST", "CAVA", "KO", "PEP",
+    "MDLZ", "KMB", "CHD", "CL", "PG", "CTVA", "CF", "ALB", "SQM", "AEM",
+    "WPM", "CCJ", "TECK", "RIO", "XOM", "COP", "DINO", "WFRD", "STNG", "VAL",
+    "EXE", "CNR", "HCC", "KNX", "ARCB", "TFII", "UBER", "DAL", "TRNO", "DHI",
+    "LEN", "TOL", "PHM", "BCC", "LPX", "WMS", "DCI", "TTC", "IR", "XYL",
+    "VLTO", "OTIS", "CARR", "ALC", "ATKR", "MLI", "FSS", "BMI", "CGNX", "PRLB",
+    "FTDR", "CWST", "WCN", "ECG", "TRI", "EFX", "SPSC", "WK", "NYT", "UL",
+    "SU",
+]
+
+TICKERS = sorted(set(_original + _added + _added2 + _added3 + _added4 + _added5))
 
 # المؤشر المرجعي لحساب القوة النسبية.
 # SPY يتبع S&P 500 (500 شركة من كل القطاعات) وهو الأنسب لقائمة
@@ -737,6 +755,11 @@ def main():
     state = load_state()
     last_scan_date = None
     last_hb = 0.0
+
+    if RUN_ON_START:
+        logging.info("⚡ فحص فوري عند الإقلاع...")
+        scan_once(state)
+        last_scan_date = datetime.now(timezone.utc).date()
 
     while True:
         try:
