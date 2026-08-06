@@ -36,7 +36,7 @@ from flask import Flask
 DEBUG = False
 
 # فحص فوري عند الإقلاع (للاختبار). أعده إلى False بعد التجربة.
-RUN_ON_START = True
+RUN_ON_START = False
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
