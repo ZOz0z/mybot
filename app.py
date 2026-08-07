@@ -5,11 +5,23 @@ Sniper Bot — DAILY swing scanner with Telegram alerts.
 الفحص: مرة واحدة يومياً بعد إغلاق السوق
 الهدف: صفقات تُحتفظ بها من يومين إلى أسبوعين
 
-تغييرات جوهرية عن نسخة النص ساعة:
-  • حُذف VWAP (لا معنى له على الفريم اليومي)
-  • الاختراق أصبح فوق أعلى قمة 20 يوم بدل 10 شمعات
-  • وقف الخسارة 2×ATR بحد أقصى 8%  |  الهدف = ضعف المخاطرة
-  • القوة النسبية مقابل SPY على 5 أيام (يغطي كل القطاعات لا التقنية فقط)
+=============================================================================
+تعديلات هذه النسخة (v2)
+=============================================================================
+1) إصلاح حساب RVOL  ← السبب الأرجح لانقطاع الإشارات
+   قديماً: متوسط 5 أيام ÷ متوسط 20 يوم (والمقام يحتوي البسط نفسه!)
+   حالياً: حجم يوم الاختراق ÷ متوسط 20 يوماً السابقة (بلا اليوم)
+
+2) عدّاد قمع حقيقي
+   كل الشروط تُحسب مستقلة قبل أي رفض، فيظهر أي شرط هو الاختناق فعلاً.
+
+3) نافذة الفحص وُسّعت
+   قديماً: الساعة 22 بالضبط. أي إعادة تشغيل بعد 22:59 كانت تُضيّع فحص اليوم.
+
+4) ملف الحالة صار قابلاً للتثبيت على قرص دائم عبر STATE_DIR.
+
+5) رسائل تيليجرام تُقسَّم تلقائياً قبل حد 4096 حرفاً.
+=============================================================================
 """
 
 from collections import Counter
@@ -35,8 +47,10 @@ from flask import Flask
 
 DEBUG = False
 
-# فحص فوري عند الإقلاع (للاختبار). أعده إلى False بعد التجربة.
-RUN_ON_START = False
+# فحص فوري عند الإقلاع.
+# ⚠️ مفعّل الآن للحاق بإغلاق اليوم. أعده إلى False بعد وصول أول تقرير،
+#    وإلا أعاد الفحص مع كل إعادة نشر أو إعادة تشغيل من Railway.
+RUN_ON_START = True
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -115,15 +129,12 @@ _added5 = [
 TICKERS = sorted(set(_original + _added + _added2 + _added3 + _added4 + _added5))
 
 # المؤشر المرجعي لحساب القوة النسبية.
-# SPY يتبع S&P 500 (500 شركة من كل القطاعات) وهو الأنسب لقائمة
-# مخلوطة بين ناسداك و NYSE: تقنية، طاقة، تعدين، صناعة، نقل.
 BENCHMARK = "SPY"
 
 # مؤشر إضافي يُعرض للعلم فقط ولا يدخل في أي حساب.
 SECONDARY_INDEX = "QQQ"
 
 # ---- إعدادات المؤشرات (يومية) ----
-VOLUME_MULTIPLIER = 1.3      # حجم اليوم مقابل متوسط 20 يوم
 VOLUME_AVG_PERIOD = 20
 RSI_PERIOD = 14
 RSI_MIN = 50
@@ -146,18 +157,31 @@ MAX_CANDLE_RANGE = 0.15           # تجنّب أيام الجنون (>15%)
 MAX_EXTENSION = 0.12              # لا يبعد أكثر من 12% عن EMA20
 MAX_DAILY_RETURN = 0.10           # لا يكون قافز أكثر من 10% اليوم
 
-# ---- الفلاتر النوعية الثلاثة الجديدة ----
+# ---- الفلاتر النوعية ----
 
 # 1) التجميع الضيق: يشترط أن يسبق الاختراقَ انضغاطٌ في السعر.
-#    اختراق بعد هدوء = حسم اتجاه. اختراق بعد تذبذب عنيف = ضوضاء.
 CONSOLIDATION_DAYS = 8          # عدد الأيام السابقة للاختراق التي نقيس ضيقها
 MAX_CONSOLIDATION_RANGE = 0.14  # أقصى اتساع مسموح لتلك الفترة (14%)
 
 # 2) الدخول المتأخر: يمنع الشراء بعد أن يكون السهم قد ابتعد عن نقطة الاختراق.
 MAX_ABOVE_BREAKOUT = 0.04       # أقصى ارتفاع فوق مستوى الاختراق (4%)
 
-# 3) الحجم النسبي على 5 أيام بدل يوم واحد شاذ.
-RVOL_DAYS = 5                   # متوسط حجم آخر 5 أيام مقابل متوسط 20 يوماً
+# 3) الحجم النسبي — تم إصلاحه في v2.
+#
+#    المشكلة القديمة: rvol = mean(آخر 5 أيام) / mean(آخر 20 يوماً)
+#    المقام يحتوي البسط، فاشتراط 1.3 كان يعني فعلياً 1.44× مقابل الـ15 يوماً
+#    السابقة — وهذا يتعارض مع اشتراط قاعدة ضيقة هادئة قبل الاختراق مباشرة.
+#
+#    الحل: قياسان منفصلان على قاعدة واحدة نظيفة (20 يوماً سابقة، بلا اليوم):
+#      • RVOL_TODAY_MIN → انفجار الحجم في يوم الاختراق نفسه (هذا هو المهم)
+#      • RVOL_5D_MIN    → لا نريد 5 أيام أضعف بوضوح من الطبيعي
+RVOL_TODAY_MIN = 1.5
+RVOL_5D_MIN = 1.0
+RVOL_DAYS = 5
+
+# شرط اليوم الأخضر (إغلاق فوق الفتح). كان مفعّلاً ضمنياً في النسخة السابقة.
+# اجعله False إن أردت قبول اختراقات فتحت بفجوة ثم أغلقت تحت الفتح.
+REQUIRE_GREEN_DAY = True
 
 # ---- فلتر الأرباح ----
 EARNINGS_BLACKOUT_DAYS = 7    # تجاهل السهم إذا كانت أرباحه خلال هذا العدد من الأيام
@@ -176,13 +200,29 @@ MAX_LOSS_PCT = 0.08               # وقف الخسارة لا يتجاوز 8%
 
 # ---- توقيت الفحص ----
 # 22:00 UTC = الساعة 1:00 بعد منتصف الليل بتوقيت السعودية، طوال السنة.
-# آمن في التوقيتين: بعد الإغلاق بساعتين صيفاً وبساعة شتاءً.
+# النافذة الآن ممتدة من 22:00 حتى 23:59، فإعادة تشغيل Railway لا تُضيّع الفحص.
 SCAN_HOUR_UTC = 22
 SCAN_MINUTE_UTC = 0
 
 HEARTBEAT_SECONDS = 43200         # كل 12 ساعة
-STATE_FILE = os.path.join(os.path.dirname(__file__), ".alert_state_daily.json")
+
+# ---- تخزين الحالة ----
+# على Railway نظام الملفات مؤقت: أي نشر جديد يمسح الملف، فتتكرر التنبيهات.
+# الحل: أنشئ Volume في Railway واربطه بمسار /data ثم اضبط STATE_DIR=/data
+# إن لم يوجد المجلد يرجع الكود تلقائياً إلى مجلد المشروع.
+_default_state_dir = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.environ.get("STATE_DIR", _default_state_dir)
+if not os.path.isdir(STATE_DIR):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+    except OSError:
+        STATE_DIR = _default_state_dir
+STATE_FILE = os.path.join(STATE_DIR, ".alert_state_daily.json")
+
 PORT = int(os.environ.get("PORT", 8080))
+
+# حد تيليجرام 4096 حرفاً — نبقى دونه بهامش أمان.
+TELEGRAM_MAX_CHARS = 3600
 
 # =============================================================================
 # Data
@@ -320,7 +360,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df[f"ema{EMA_SLOW}"] = ta.ema(df["close"], length=EMA_SLOW)
     df[f"ema{EMA_LONG}"] = ta.ema(df["close"], length=EMA_LONG)
     df["rsi"] = ta.rsi(df["close"], length=RSI_PERIOD)
-    df["avg_volume"] = df["volume"].rolling(VOLUME_AVG_PERIOD).mean()
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
     adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
     df["adx"] = adx_df["ADX_14"] if (adx_df is not None and "ADX_14" in adx_df.columns) else 0
@@ -329,6 +368,26 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 # Signal evaluation
 # =============================================================================
+
+# ترتيب الشروط في التقرير وفي اختيار سبب الرفض المعروض.
+CHECK_ORDER = [
+    "Liquidity",     # سيولة دولارية
+    "EMA Stack",     # 10 > 20 > 50 > 200
+    "Above EMA10",
+    "RSI",
+    "ADX",
+    "ATR",
+    "Extension",     # قرب EMA20
+    "Green Day",
+    "Sane Range",
+    "No Gap",
+    "Breakout",      # اختراق قمة 20 يوم
+    "Not Late",      # لم يبتعد فوق نقطة الاختراق
+    "Tight Base",    # تجميع ضيق قبل الاختراق
+    "RVOL Today",    # انفجار حجم يوم الاختراق
+    "RVOL 5d",
+]
+
 
 def _scale(value, lo, hi, weight) -> float:
     """يحوّل قيمة إلى نقاط ضمن النطاق [lo, hi] مضروبة في وزنها."""
@@ -349,8 +408,9 @@ def score_signal(sig: dict) -> float:
     # 1) القوة النسبية: من -5% (ضعيف) إلى +15% (متفوق بقوة)
     pts_rel = _scale(sig.get("rel_strength"), -5.0, 15.0, W_REL_STRENGTH)
 
-    # 2) الحجم: من 1.3x (الحد الأدنى المقبول) إلى 4x (انفجار حجم)
-    pts_vol = _scale(sig.get("rvol"), 1.3, 4.0, W_RVOL)
+    # 2) الحجم: من 1.5x (الحد الأدنى المقبول) إلى 5x (انفجار حجم)
+    #    النطاق وُسّع في v2 لأن المقياس صار حجم اليوم لا متوسط 5 أيام.
+    pts_vol = _scale(sig.get("rvol_today"), RVOL_TODAY_MIN, 5.0, W_RVOL)
 
     # 3) الاتجاه: من 20 (بداية اتجاه) إلى 45 (اتجاه قوي جداً)
     pts_adx = _scale(sig.get("adx"), 20.0, 45.0, W_ADX)
@@ -363,110 +423,90 @@ def score_signal(sig: dict) -> float:
 
 
 def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | None, str | None, dict]:
+    """
+    يعيد (إشارة أو None، سبب الرفض، قاموس نتائج كل الشروط).
+
+    الفرق الجوهري عن v1: كل الشروط تُحسب أولاً ثم يُقرّر الرفض.
+    في v1 كان أول شرط ساقط ينهي الدالة، فتبقى بقية الشروط مجهولة
+    والتقرير يظهر رقماً واحداً مضللاً بدل صورة القمع كاملة.
+    """
     df = compute_indicators(df)
 
-    stats = {"EMA Trend": False, "RSI": False,
-             "ADX": False, "Volume": False, "Breakout": False}
-
     needed = [f"ema{EMA_FAST}", f"ema{EMA_MID}", f"ema{EMA_SLOW}",
-              f"ema{EMA_LONG}", "rsi", "avg_volume", "adx", "atr"]
-    last_row = df[needed].iloc[-1]
-    if last_row.isna().any():
-        return None, "Missing Indicators", stats
+              f"ema{EMA_LONG}", "rsi", "adx", "atr"]
+    if len(df) < max(BREAKOUT_LOOKBACK, VOLUME_AVG_PERIOD, CONSOLIDATION_DAYS) + 3:
+        return None, "Not Enough Bars", {}
+    if df[needed].iloc[-1].isna().any():
+        return None, "Missing Indicators", {}
 
     last = df.iloc[-1]
-    close, open_p = last["close"], last["open"]
-    high, low = last["high"], last["low"]
-    volume, avg_volume = last["volume"], last["avg_volume"]
-    rsi, adx, atr = last["rsi"], last["adx"], last["atr"]
+    close, open_p = float(last["close"]), float(last["open"])
+    high, low = float(last["high"]), float(last["low"])
+    volume = float(last["volume"])
+    rsi, adx, atr = float(last["rsi"]), float(last["adx"]), float(last["atr"])
 
-    ema_f = last[f"ema{EMA_FAST}"]
-    ema_m = last[f"ema{EMA_MID}"]
-    ema_s = last[f"ema{EMA_SLOW}"]
-    ema_l = last[f"ema{EMA_LONG}"]
+    ema_f = float(last[f"ema{EMA_FAST}"])
+    ema_m = float(last[f"ema{EMA_MID}"])
+    ema_s = float(last[f"ema{EMA_SLOW}"])
+    ema_l = float(last[f"ema{EMA_LONG}"])
 
+    # ---- الاختراق ----
     prev_bars = df.iloc[-(BREAKOUT_LOOKBACK + 1):-1]
-    highest = prev_bars["high"].max()
+    highest = float(prev_bars["high"].max())
     breakout_price = highest * BREAKOUT_BUFFER
+    above_breakout = (close - highest) / highest if highest > 0 else 0.0
 
+    # ---- الحجم (الحساب المصحَّح) ----
+    # القاعدة: متوسط 20 يوماً *سابقة* — لا تشمل اليوم الحالي إطلاقاً.
+    vol_base = float(df["volume"].iloc[-(VOLUME_AVG_PERIOD + 1):-1].mean())
+    rvol_today = volume / vol_base if vol_base > 0 else 0.0
+    rvol_5d = float(df["volume"].iloc[-RVOL_DAYS:].mean()) / vol_base if vol_base > 0 else 0.0
     dollar_volume = close * volume
 
-    # الحجم النسبي على متوسط آخر 5 أيام — أصدق من يوم واحد قد يكون شاذاً
-    recent_vol = df["volume"].iloc[-RVOL_DAYS:].mean()
-    rvol = recent_vol / avg_volume if avg_volume > 0 else 0
-    rvol_today = volume / avg_volume if avg_volume > 0 else 0
+    # ---- التجميع الضيق ----
+    cons = df.iloc[-(CONSOLIDATION_DAYS + 1):-1]
+    c_high, c_low = float(cons["high"].max()), float(cons["low"].min())
+    cons_range = (c_high - c_low) / c_low if c_low > 0 else 1.0
 
-    # --- إحصائيات ---
-    if ema_f > ema_m > ema_s > ema_l:
-        stats["EMA Trend"] = True
-    if RSI_MIN <= rsi <= RSI_MAX:
-        stats["RSI"] = True
-    if ADX_MIN <= adx <= ADX_MAX:
-        stats["ADX"] = True
-    if rvol > VOLUME_MULTIPLIER and dollar_volume >= MIN_DOLLAR_VOLUME:
-        stats["Volume"] = True
-    if close > breakout_price:
-        stats["Breakout"] = True
-
-    # --- الشروط ---
-    if close <= open_p:
-        return None, "Bearish Day", stats
-
+    # ---- بقية القياسات ----
     candle_range = high - low
-    if candle_range == 0:
-        return None, "No Range", stats
-    if candle_range / close > MAX_CANDLE_RANGE:
-        return None, "Crazy Range Day", stats
+    range_pct = candle_range / close if close > 0 else 0.0
+    prev_close = float(df["close"].iloc[-2])
+    daily_return = (close - prev_close) / prev_close if prev_close > 0 else 0.0
+    extension = (close - ema_m) / ema_m if ema_m > 0 else 0.0
 
-    if close <= breakout_price:
-        return None, f"No 20D Breakout", stats
+    # ---- كل الشروط، مستقلة ----
+    checks = {
+        "Liquidity":  dollar_volume >= MIN_DOLLAR_VOLUME,
+        "EMA Stack":  ema_f > ema_m > ema_s > ema_l,
+        "Above EMA10": close >= ema_f,
+        "RSI":        RSI_MIN <= rsi <= RSI_MAX,
+        "ADX":        ADX_MIN <= adx <= ADX_MAX,
+        "ATR":        (atr / close) >= MIN_ATR_PCT if close > 0 else False,
+        "Extension":  extension <= MAX_EXTENSION,
+        "Green Day":  (close > open_p) if REQUIRE_GREEN_DAY else True,
+        "Sane Range": 0 < range_pct <= MAX_CANDLE_RANGE,
+        "No Gap":     daily_return <= MAX_DAILY_RETURN,
+        "Breakout":   close > breakout_price,
+        "Not Late":   above_breakout <= MAX_ABOVE_BREAKOUT,
+        "Tight Base": cons_range <= MAX_CONSOLIDATION_RANGE,
+        "RVOL Today": rvol_today >= RVOL_TODAY_MIN,
+        "RVOL 5d":    rvol_5d >= RVOL_5D_MIN,
+    }
 
-    # ── فلتر الدخول المتأخر ──
-    # لا نشتري سهماً ابتعد كثيراً فوق نقطة اختراقه؛ المخاطرة تكبر والفرصة تصغر.
-    above_breakout = (close - highest) / highest
-    if above_breakout > MAX_ABOVE_BREAKOUT:
-        return None, f"Late Entry ({above_breakout*100:.1f}% above)", stats
-
-    # ── فلتر التجميع الضيق ──
-    # نقيس اتساع السعر في الأيام السابقة للاختراق: كلما ضاق، كان الاختراق أصدق.
-    if len(df) >= CONSOLIDATION_DAYS + 2:
-        cons = df.iloc[-(CONSOLIDATION_DAYS + 1):-1]
-        c_high, c_low = cons["high"].max(), cons["low"].min()
-        cons_range = (c_high - c_low) / c_low if c_low > 0 else 1.0
-        if cons_range > MAX_CONSOLIDATION_RANGE:
-            return None, f"No Tight Base ({cons_range*100:.0f}%)", stats
-    else:
-        cons_range = None
-
-    if dollar_volume < MIN_DOLLAR_VOLUME:
-        return None, "Low Dollar Volume", stats
-
-    if atr / close < MIN_ATR_PCT:
-        return None, "Too Quiet (ATR)", stats
-
-    daily_return = (close - df["close"].iloc[-2]) / df["close"].iloc[-2]
-    if daily_return > MAX_DAILY_RETURN:
-        return None, "Gapped Too Much", stats
-
-    # الترند الكامل: 10 > 20 > 50 > 200
-    if not (ema_f > ema_m > ema_s > ema_l):
-        return None, "EMA Stack Wrong", stats
-
-    if close < ema_f:
-        return None, "Below EMA10", stats
-
-    extension = (close - ema_m) / ema_m
-    if extension > MAX_EXTENSION:
-        return None, f"Overextended ({extension*100:.1f}%)", stats
-
-    if rvol <= VOLUME_MULTIPLIER:
-        return None, f"Low Volume 5d ({rvol:.2f}x)", stats
-
-    if not (RSI_MIN <= rsi <= RSI_MAX):
-        return None, f"RSI Out ({rsi:.0f})", stats
-
-    if not (ADX_MIN <= adx <= ADX_MAX):
-        return None, f"ADX Out ({adx:.0f})", stats
+    failed = [k for k in CHECK_ORDER if not checks.get(k, True)]
+    if failed:
+        # سبب مقروء لأول شرط ساقط، مع رقمه للتشخيص
+        detail = {
+            "RSI": f"RSI Out ({rsi:.0f})",
+            "ADX": f"ADX Out ({adx:.0f})",
+            "Extension": f"Overextended ({extension*100:.1f}%)",
+            "Not Late": f"Late Entry ({above_breakout*100:.1f}%)",
+            "Tight Base": f"Wide Base ({cons_range*100:.0f}%)",
+            "RVOL Today": f"Low RVOL ({rvol_today:.2f}x)",
+            "RVOL 5d": f"Low RVOL 5d ({rvol_5d:.2f}x)",
+        }.get(failed[0], failed[0])
+        return None, detail, checks
 
     # --- إدارة المخاطر ---
     stop = close - ATR_STOP_MULT * atr
@@ -480,25 +520,25 @@ def evaluate_signal(df: pd.DataFrame, bench_5d: float | None) -> tuple[dict | No
 
     return {
         "bar_date": df.index[-1],
-        "close": float(close),
-        "rsi": float(rsi),
-        "adx": float(adx),
-        "atr": float(atr),
-        "rvol": float(rvol),
-        "rvol_today": float(rvol_today),
-        "above_breakout": float(above_breakout * 100),
-        "cons_range": (float(cons_range * 100) if cons_range is not None else None),
-        "dollar_volume": float(dollar_volume),
-        "daily_return": float(daily_return * 100),
+        "close": close,
+        "rsi": rsi,
+        "adx": adx,
+        "atr": atr,
+        "rvol_today": rvol_today,
+        "rvol_5d": rvol_5d,
+        "above_breakout": above_breakout * 100,
+        "cons_range": cons_range * 100,
+        "dollar_volume": dollar_volume,
+        "daily_return": daily_return * 100,
         "stock_5d": stock_5d,
         "bench_5d": bench_5d,
         "rel_strength": rel,
-        "breakout_level": float(highest),
-        "extension": float(extension * 100),
-        "stop_loss": float(stop),
-        "take_profit": float(target),
-        "risk_pct": float(risk / close * 100),
-    }, None, stats
+        "breakout_level": highest,
+        "extension": extension * 100,
+        "stop_loss": stop,
+        "take_profit": target,
+        "risk_pct": risk / close * 100,
+    }, None, checks
 
 # =============================================================================
 # Telegram
@@ -532,6 +572,17 @@ def send_msg(text: str) -> bool:
     return False
 
 
+def send_msgs(parts: list[str]) -> bool:
+    """إرسال عدة رسائل متتابعة مع فاصل بسيط لتفادي حد المعدل."""
+    ok = True
+    for i, p in enumerate(parts):
+        if not send_msg(p):
+            ok = False
+        if i < len(parts) - 1:
+            time.sleep(1)
+    return ok
+
+
 def _grade(score: float) -> str:
     if score >= 75:
         return "🥇 ممتازة"
@@ -542,10 +593,39 @@ def _grade(score: float) -> str:
     return "⚪ ضعيفة"
 
 
-def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
+def _signal_block(rank: int, symbol: str, sg: dict) -> list[str]:
+    if sg["rel_strength"] is None:
+        rel = "القوة النسبية غير متاحة"
+    elif sg["rel_strength"] > 0:
+        rel = f"أقوى من السوق بـ {sg['rel_strength']:+.1f}%"
+    else:
+        rel = f"أضعف من السوق بـ {sg['rel_strength']:.1f}%"
+
+    ed = sg.get("earnings_date")
+    earn = f"🗓 أرباح: {ed}" if ed else "🗓 لا أرباح قريبة"
+
+    return [
+        "━━━━━━━━━━━━━━━━━━",
+        f"{rank}) {symbol}   {sg['score']}/100  {_grade(sg['score'])}",
+        "",
+        f"💵 الدخول      : ${sg['close']:.2f}",
+        f"🛑 وقف الخسارة : ${sg['stop_loss']:.2f}   (-{sg['risk_pct']:.1f}%)",
+        f"🎯 الهدف       : ${sg['take_profit']:.2f}   (+{sg['risk_pct']*RISK_REWARD:.1f}%)",
+        "",
+        f"🔳 اخترق قمة 20 يوم عند ${sg['breakout_level']:.2f}",
+        f"💪 {rel}",
+        f"📊 RVOL اليوم {sg['rvol_today']:.2f}x  (5 أيام {sg['rvol_5d']:.2f}x)",
+        f"⚡ RSI {sg['rsi']:.0f}  |  🔥 ADX {sg['adx']:.0f}",
+        f"📏 بُعده عن EMA20: {sg['extension']:.1f}%  |  فوق الاختراق: {sg['above_breakout']:.1f}%",
+        f"🤏 قاعدة ضيقة: {sg['cons_range']:.0f}% خلال {CONSOLIDATION_DAYS} أيام",
+        earn,
+    ]
+
+
+def format_batch_messages(signals: list, bench_5d, qqq_5d=None) -> list[str]:
     """
-    رسالة واحدة تضم كل صيدات اليوم، مرتبة من الأقوى للأضعف،
-    وكل صيدة معها سعر الدخول ووقف الخسارة والهدف.
+    يبني رسائل تيليجرام مرتبة من الأقوى للأضعف، ويقسّمها تلقائياً
+    قبل حد 4096 حرفاً بحيث لا تُقطع أي صيدة في المنتصف.
     """
     signals = sorted(signals, key=lambda x: x[1]["score"], reverse=True)
 
@@ -554,7 +634,7 @@ def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
     bench_txt = f"{bench_5d:+.1f}%" if bench_5d is not None else "غير متاح"
     qqq_txt   = f"{qqq_5d:+.1f}%" if qqq_5d is not None else "غير متاح"
 
-    lines = [
+    header = [
         f"🎯 صيدات اليوم — {len(signals)}",
         f"شمعة {date_str}",
         f"📉 السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}",
@@ -562,35 +642,7 @@ def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
         "مرتبة من الأقوى للأضعف 👇",
     ]
 
-    for rank, (symbol, sg) in enumerate(signals, start=1):
-        if sg["rel_strength"] is None:
-            rel = "القوة النسبية غير متاحة"
-        elif sg["rel_strength"] > 0:
-            rel = f"أقوى من السوق بـ {sg['rel_strength']:+.1f}%"
-        else:
-            rel = f"أضعف من السوق بـ {sg['rel_strength']:.1f}%"
-
-        ed = sg.get("earnings_date")
-        earn = f"🗓 أرباح: {ed}" if ed else "🗓 لا أرباح قريبة"
-
-        lines += [
-            "━━━━━━━━━━━━━━━━━━",
-            f"{rank}) {symbol}   {sg['score']}/100  {_grade(sg['score'])}",
-            "",
-            f"💵 الدخول      : ${sg['close']:.2f}",
-            f"🛑 وقف الخسارة : ${sg['stop_loss']:.2f}   (-{sg['risk_pct']:.1f}%)",
-            f"🎯 الهدف       : ${sg['take_profit']:.2f}   (+{sg['risk_pct']*RISK_REWARD:.1f}%)",
-            "",
-            f"🔳 اخترق قمة 20 يوم عند ${sg['breakout_level']:.2f}",
-            f"💪 {rel}",
-            f"📊 RVOL 5أيام {sg['rvol']:.2f}x  |  ⚡ RSI {sg['rsi']:.0f}  |  🔥 ADX {sg['adx']:.0f}",
-            f"📏 بُعده عن EMA20: {sg['extension']:.1f}%  |  فوق الاختراق: {sg['above_breakout']:.1f}%",
-            (f"🤏 قاعدة ضيقة: {sg['cons_range']:.0f}% خلال {CONSOLIDATION_DAYS} أيام"
-             if sg.get('cons_range') is not None else "🤏 قاعدة: غير محسوبة"),
-            earn,
-        ]
-
-    lines += [
+    footer = [
         "━━━━━━━━━━━━━━━━━━",
         "",
         "📋 الخطة:",
@@ -602,6 +654,31 @@ def format_batch_message(signals: list, bench_5d, qqq_5d=None) -> str:
         "⚠️ برأس مال صغير اكتفِ بالصيدة الأولى فقط.",
     ]
 
+    messages: list[str] = []
+    current = list(header)
+
+    for rank, (symbol, sg) in enumerate(signals, start=1):
+        block = _signal_block(rank, symbol, sg)
+        if len("\n".join(current + block)) > TELEGRAM_MAX_CHARS and len(current) > len(header):
+            messages.append("\n".join(current))
+            current = [f"…تكملة صيدات اليوم ({len(messages)+1})"]
+        current += block
+
+    current += footer
+    messages.append("\n".join(current))
+    return messages
+
+
+def format_funnel_report(check_counter: Counter, evaluated: int) -> str:
+    """رسالة تشخيصية: كم سهماً اجتاز كل شرط على حدة، الأضيق أولاً."""
+    if evaluated == 0:
+        return "📭 لم يُقيَّم أي سهم اليوم."
+    rows = sorted(CHECK_ORDER, key=lambda k: check_counter.get(k, 0))
+    lines = [f"🔬 قمع الفلاتر — من {evaluated} سهم مُقيَّم", ""]
+    for k in rows:
+        c = check_counter.get(k, 0)
+        lines.append(f"{c:>4} ({c/evaluated*100:>3.0f}%)  {k}")
+    lines += ["", "الأعلى في القائمة = الاختناق الأضيق."]
     return "\n".join(lines)
 
 
@@ -619,8 +696,11 @@ def load_state() -> dict:
         return {}
 
 def save_state(state: dict):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except OSError as e:
+        logging.error(f"تعذّر حفظ الحالة: {e}")
 
 # =============================================================================
 # Health server
@@ -650,9 +730,10 @@ def scan_once(state: dict):
 
     signals = 0
     rejected = 0
-    found = []          # كل الصيدات تُجمَّع هنا ثم تُرسل في رسالة واحدة
+    evaluated = 0
+    found = []
     reasons = Counter()
-    passes = {"EMA Trend": 0, "RSI": 0, "ADX": 0, "Volume": 0, "Breakout": 0}
+    check_counter = Counter()
 
     for symbol in TICKERS:
         if symbol in missing or symbol not in all_dfs:
@@ -668,10 +749,13 @@ def scan_once(state: dict):
             rejected += 1
             continue
 
-        signal, reason, stats = evaluate_signal(df, bench_5d)
-        for k, v in stats.items():
-            if v:
-                passes[k] += 1
+        signal, reason, checks = evaluate_signal(df, bench_5d)
+
+        if checks:
+            evaluated += 1
+            for k, v in checks.items():
+                if v:
+                    check_counter[k] += 1
 
         if signal is None:
             reasons[reason] += 1
@@ -683,7 +767,7 @@ def scan_once(state: dict):
         # فلتر الأرباح — يُفحص أخيراً لأنه يتطلب طلباً إضافياً لياهو
         soon, edate = has_earnings_soon(symbol)
         if soon:
-            reasons[f"Earnings Soon"] += 1
+            reasons["Earnings Soon"] += 1
             rejected += 1
             logging.info(f"{symbol} ⛔ تم تجاهله — أرباح بتاريخ {edate}")
             continue
@@ -699,11 +783,10 @@ def scan_once(state: dict):
         state[symbol] = bar_key
         signals += 1
 
-    # ── إرسال رسالة واحدة تضم كل الصيدات مرتبة ──
+    # ── إرسال الصيدات (مقسّمة إن لزم) ──
     if found:
         save_state(state)
-        ok = send_msg(format_batch_message(found, bench_5d, qqq_5d))
-        if not ok:
+        if not send_msgs(format_batch_messages(found, bench_5d, qqq_5d)):
             logging.error("⚠️ فشل إرسال رسالة الصيدات إلى تيليجرام")
         top = max(found, key=lambda x: x[1]["score"])
         logging.info(f"🏆 الأقوى اليوم: {top[0]} بـ {top[1]['score']}/100")
@@ -712,18 +795,19 @@ def scan_once(state: dict):
     bench_txt = f"{bench_5d:+.2f}%" if bench_5d is not None else "N/A"
     qqq_txt   = f"{qqq_5d:+.2f}%" if qqq_5d is not None else "N/A"
 
+    funnel_txt = format_funnel_report(check_counter, evaluated)
+
     rep = ["\n========== Daily Scan =========="]
     rep.append(f"SPY (5 أيام) : {bench_txt}   ← مرجع القوة النسبية")
     rep.append(f"QQQ (5 أيام) : {qqq_txt}   ← للعلم فقط")
-    rep.append(f"Scanned  : {len(TICKERS)}")
-    rep.append(f"Signals  : {signals}")
-    rep.append(f"Rejected : {rejected}\n")
+    rep.append(f"Scanned   : {len(TICKERS)}")
+    rep.append(f"Evaluated : {evaluated}")
+    rep.append(f"Signals   : {signals}")
+    rep.append(f"Rejected  : {rejected}\n")
     rep.append("Top Reject Reasons")
     for i, (r, c) in enumerate(reasons.most_common(8), 1):
-        rep.append(f"{i}- {r:<26}: {c:<3} ({c/len(TICKERS)*100:.0f}%)")
-    rep.append("\nFilter Statistics")
-    for k in ["EMA Trend", "RSI", "ADX", "Volume", "Breakout"]:
-        rep.append(f"{k:<14}: {passes[k]} PASS")
+        rep.append(f"{i}- {str(r):<26}: {c:<3} ({c/len(TICKERS)*100:.0f}%)")
+    rep.append("\n" + funnel_txt)
     rep.append(f"\nTotal {elapsed:.1f}s")
     rep.append("================================\n")
     logging.info("\n".join(rep))
@@ -731,7 +815,8 @@ def scan_once(state: dict):
     if signals == 0:
         send_msg(
             "📭 فحص اليوم انتهى — لا توجد صيدة.\n"
-            f"السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}"
+            f"السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}\n\n"
+            + funnel_txt
         )
 
 # =============================================================================
@@ -747,7 +832,7 @@ def main():
             time.sleep(3600)
 
     send_msg(
-        f"🤖 Sniper Bot — النسخة اليومية\n"
+        f"🤖 Sniper Bot — النسخة اليومية v2\n"
         f"يراقب {len(TICKERS)} سهم على الفريم اليومي.\n"
         f"فحص واحد يومياً بعد إغلاق السوق ✅"
     )
@@ -770,10 +855,15 @@ def main():
                 last_hb = time.monotonic()
 
             is_weekday = now.weekday() < 5
-            is_scan_time = (now.hour == SCAN_HOUR_UTC and now.minute >= SCAN_MINUTE_UTC)
+            # النافذة ممتدة: أي لحظة من 22:00 حتى 23:59 تصلح للفحص،
+            # فإعادة تشغيل Railway داخل هذه الفترة لا تُضيّع فحص اليوم.
+            after_scan_time = (
+                now.hour > SCAN_HOUR_UTC
+                or (now.hour == SCAN_HOUR_UTC and now.minute >= SCAN_MINUTE_UTC)
+            )
             today = now.date()
 
-            if is_weekday and is_scan_time and last_scan_date != today:
+            if is_weekday and after_scan_time and last_scan_date != today:
                 scan_once(state)
                 last_scan_date = today
 
