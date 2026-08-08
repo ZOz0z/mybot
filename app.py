@@ -47,10 +47,8 @@ from flask import Flask
 
 DEBUG = False
 
-# فحص فوري عند الإقلاع.
-# ⚠️ مفعّل الآن للحاق بإغلاق اليوم. أعده إلى False بعد وصول أول تقرير،
-#    وإلا أعاد الفحص مع كل إعادة نشر أو إعادة تشغيل من Railway.
-RUN_ON_START = True
+# فحص فوري عند الإقلاع (للاختبار فقط). أبقِه False في التشغيل العادي.
+RUN_ON_START = False
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -192,6 +190,18 @@ W_REL_STRENGTH = 30   # التفوق على السوق
 W_RVOL         = 25   # قوة الحجم
 W_ADX          = 25   # وضوح الاتجاه
 W_PROXIMITY    = 20   # قرب السعر من EMA20 (دخول نظيف)
+
+# ---- عتبة النقاط (مستخلصة من الباكتست) ----
+# النقاط كانت تُعرض فقط ولا تفلتر. القياس على 226 صفقة أظهر:
+#   بلا فلترة (كل الإشارات) : R = 0.115
+#   نقاط ≥45 (31 إشارة)     : R = 0.247  ← الضعف تقريباً
+# الإشارات دون هذه العتبة تُحسب وتُسجَّل في اللوج لكن لا يُرسل بها تنبيه.
+MIN_SCORE = 45.0
+
+# ---- مدة الاحتفاظ ----
+# كانت 10 أيام. الباكتست أظهر أن 113 صفقة من 226 كانت تموت بلا حسم،
+# وأن تمديدها إلى 20 يوماً ضاعف العائد (0.056 → 0.115 R).
+HOLD_DAYS = 20
 
 # ---- إدارة المخاطر ----
 ATR_STOP_MULT = 2.0
@@ -649,7 +659,7 @@ def format_batch_messages(signals: list, bench_5d, qqq_5d=None) -> list[str]:
         "• انتظر 15 دقيقة بعد الفتح ثم ادخل بأمر محدد",
         "• إن فتح أعلى من سعر الدخول بأكثر من 2% → تجاهله",
         "• ضع وقف الخسارة فوراً بعد التنفيذ",
-        "• اخرج إن لم يتحرك خلال 10 أيام تداول",
+        f"• اخرج إن لم يتحرك خلال {HOLD_DAYS} يوم تداول",
         "",
         "⚠️ برأس مال صغير اكتفِ بالصيدة الأولى فقط.",
     ]
@@ -732,6 +742,7 @@ def scan_once(state: dict):
     rejected = 0
     evaluated = 0
     found = []
+    weak = []           # اجتازت كل الشروط لكن نقاطها دون العتبة
     reasons = Counter()
     check_counter = Counter()
 
@@ -764,6 +775,16 @@ def scan_once(state: dict):
                 logging.info(f"{symbol} ❌ {reason}")
             continue
 
+        # ── عتبة النقاط ──
+        # تُحسب قبل فلتر الأرباح لأنها مجانية، بينما فلتر الأرباح يكلّف
+        # طلباً إضافياً لياهو لكل سهم.
+        score = score_signal(signal)
+        if score < MIN_SCORE:
+            reasons[f"Score < {MIN_SCORE:.0f}"] += 1
+            rejected += 1
+            weak.append((symbol, score))
+            continue
+
         # فلتر الأرباح — يُفحص أخيراً لأنه يتطلب طلباً إضافياً لياهو
         soon, edate = has_earnings_soon(symbol)
         if soon:
@@ -773,7 +794,7 @@ def scan_once(state: dict):
             continue
 
         signal["earnings_date"] = edate
-        signal["score"] = score_signal(signal)
+        signal["score"] = score
 
         logging.info(
             f"✅ SIGNAL {symbol} | {signal['score']}/100 | ${signal['close']:.2f} "
@@ -812,12 +833,19 @@ def scan_once(state: dict):
     rep.append("================================\n")
     logging.info("\n".join(rep))
 
+    if weak:
+        weak_sorted = sorted(weak, key=lambda x: x[1], reverse=True)
+        logging.info("إشارات دون العتبة: " +
+                     " | ".join(f"{s} {sc:.0f}" for s, sc in weak_sorted[:10]))
+
     if signals == 0:
-        send_msg(
-            "📭 فحص اليوم انتهى — لا توجد صيدة.\n"
-            f"السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}\n\n"
-            + funnel_txt
-        )
+        msg = ("📭 فحص اليوم انتهى — لا توجد صيدة.\n"
+               f"السوق 5 أيام — SPY {bench_txt}  |  QQQ {qqq_txt}\n")
+        if weak:
+            ws = sorted(weak, key=lambda x: x[1], reverse=True)[:5]
+            msg += (f"\n⚪ اجتازت الشروط لكن نقاطها < {MIN_SCORE:.0f}:\n"
+                    + "\n".join(f"   {s} — {sc:.0f}/100" for s, sc in ws) + "\n")
+        send_msg(msg + "\n" + funnel_txt)
 
 # =============================================================================
 # Main
